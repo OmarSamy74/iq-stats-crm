@@ -959,28 +959,19 @@ def generate_analytics_graphs(df, charts_data, date_str, title_prefix="Analytics
             
             # 4. Sales Funnel
             if 'sales_funnel' in charts_data and not charts_data['sales_funnel'].empty:
-                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
                 funnel_data = charts_data['sales_funnel']
-                stages = funnel_data['stage']
-                counts = funnel_data['count']
-                
-                # Create funnel chart
-                y_pos = np.arange(len(stages))
-                bars = ax.barh(y_pos, counts, color=plt.cm.viridis(np.linspace(0, 1, len(stages))))
-                ax.set_yticks(y_pos)
-                ax.set_yticklabels(stages)
-                ax.set_xlabel('Number of Leads', fontsize=12)
-                ax.set_title(f'{title_prefix} - Sales Funnel', fontsize=16, fontweight='bold')
-                ax.grid(True, alpha=0.3, axis='x')
-                
-                # Add value labels
-                for i, (bar, count) in enumerate(zip(bars, counts)):
-                    ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
-                           f'{int(count)}', ha='left', va='center', fontweight='bold')
-                
-                plt.tight_layout()
-                pdf.savefig(fig)
-                plt.close()
+                stage_col = 'stage' if 'stage' in funnel_data.columns else ('status' if 'status' in funnel_data.columns else None)
+                if stage_col is not None and 'count' in funnel_data.columns:
+                    fig = go.Figure(go.Funnel(
+                        y=funnel_data[stage_col],
+                        x=funnel_data['count'],
+                        textinfo="value+percent initial"
+                    ))
+                    fig.update_layout(
+                        title=f'{title_prefix} - Sales Funnel',
+                        template="plotly_white"
+                    )
+                    graphs['sales_funnel.html'] = fig.to_html(include_plotlyjs='cdn')
             
             # 5. Contact Methods Analysis
             if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
@@ -1163,16 +1154,18 @@ def generate_plotly_graphs(df, charts_data, date_str, title_prefix="Analytics"):
         # 4. Sales Funnel
         if 'sales_funnel' in charts_data and not charts_data['sales_funnel'].empty:
             funnel_data = charts_data['sales_funnel']
-            fig = go.Figure(go.Funnel(
-                y=funnel_data['stage'],
-                x=funnel_data['count'],
-                textinfo="value+percent initial"
-            ))
-            fig.update_layout(
-                title=f'{title_prefix} - Sales Funnel',
-                template="plotly_white"
-            )
-            graphs['sales_funnel.html'] = fig.to_html(include_plotlyjs='cdn')
+            stage_col = 'stage' if 'stage' in funnel_data.columns else ('status' if 'status' in funnel_data.columns else None)
+            if stage_col is not None and 'count' in funnel_data.columns:
+                fig = go.Figure(go.Funnel(
+                    y=funnel_data[stage_col],
+                    x=funnel_data['count'],
+                    textinfo="value+percent initial"
+                ))
+                fig.update_layout(
+                    title=f'{title_prefix} - Sales Funnel',
+                    template="plotly_white"
+                )
+                graphs['sales_funnel.html'] = fig.to_html(include_plotlyjs='cdn')
         
         # 5. Contact Methods Analysis
         if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
@@ -1340,17 +1333,21 @@ def generate_analytics_pngs(df, charts_data, date_str, title_prefix="Analytics")
     if 'sales_funnel' in charts_data and not charts_data['sales_funnel'].empty:
         fig, ax = plt.subplots(figsize=(12, 8))
         funnel_data = charts_data['sales_funnel']
-        stages = funnel_data['stage']
-        counts = funnel_data['count']
-        y_pos = np.arange(len(stages))
-        bars = ax.barh(y_pos, counts, color=plt.cm.viridis(np.linspace(0, 1, len(stages))))
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(stages)
-        ax.set_xlabel('Number of Leads')
-        ax.set_title(f'{title_prefix} — Sales Funnel ({date_str})', fontsize=16, fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='x')
-        for bar, count in zip(bars, counts):
-            ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, f'{int(count)}', va='center')
+        stage_col = 'stage' if 'stage' in funnel_data.columns else ('status' if 'status' in funnel_data.columns else None)
+        if stage_col is not None and 'count' in funnel_data.columns:
+            stages = funnel_data[stage_col]
+            counts = funnel_data['count']
+            y_pos = np.arange(len(stages))
+            bars = ax.barh(y_pos, counts, color=plt.cm.viridis(np.linspace(0, 1, len(stages))))
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(stages)
+            ax.set_xlabel('Number of Leads')
+            ax.set_title(f'{title_prefix} — Sales Funnel ({date_str})', fontsize=16, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='x')
+            for bar, count in zip(bars, counts):
+                ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, f'{int(count)}', va='center')
+        else:
+            ax.text(0.5, 0.5, 'No funnel data', ha='center', va='center')
         save_fig(fig, '04_sales_funnel.png')
 
     if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
