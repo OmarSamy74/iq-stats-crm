@@ -1313,36 +1313,37 @@ elif role == 'ceo':
 else:
     st.write('Role not supported in UI')
 
-# Recent Activity Section
-st.sidebar.markdown('---')
-st.sidebar.markdown('### 📊 Recent Activity')
-if st.sidebar.checkbox('Show recent activity', value=True):
-    db = get_session()
-    try:
-        # Get recent activities
-        acts = db.query(Activity).order_by(Activity.timestamp.desc()).limit(20).all()
-        if acts:
-            st.sidebar.markdown('**Latest System Activities:**')
-            for i, a in enumerate(acts, 1):
-                time_str = a.timestamp.strftime('%m/%d %H:%M')
-                st.sidebar.markdown(f"**{i}.** `{time_str}` - **{a.actor}** {a.action} Lead #{a.lead_id}")
-        else:
-            st.sidebar.info('No recent activities found.')
-        
-        # Get recent login events
-        st.sidebar.markdown('---')
-        st.sidebar.markdown('**Recent Logins:**')
-        recent_logins = db.query(LoginEvent).order_by(LoginEvent.logged_in_at.desc()).limit(10).all()
-        if recent_logins:
-            for i, login in enumerate(recent_logins, 1):
-                time_str = login.logged_in_at.strftime('%m/%d %H:%M')
-                st.sidebar.markdown(f"**{i}.** `{time_str}` - **{login.username}** ({login.role})")
-        else:
-            st.sidebar.info('No recent logins found.')
+# Recent Activity Section - Only for CEO and CTO
+if role in ['ceo', 'cto']:
+    st.sidebar.markdown('---')
+    st.sidebar.markdown('### 📊 Recent Activity')
+    if st.sidebar.checkbox('Show recent activity', value=True):
+        db = get_session()
+        try:
+            # Get recent activities
+            acts = db.query(Activity).order_by(Activity.timestamp.desc()).limit(20).all()
+            if acts:
+                st.sidebar.markdown('**Latest System Activities:**')
+                for i, a in enumerate(acts, 1):
+                    time_str = a.timestamp.strftime('%m/%d %H:%M')
+                    st.sidebar.markdown(f"**{i}.** `{time_str}` - **{a.actor}** {a.action} Lead #{a.lead_id}")
+            else:
+                st.sidebar.info('No recent activities found.')
             
-    except Exception as e:
-        st.sidebar.error(f'Error loading activities: {str(e)}')
-    finally:
-        db.close()
+            # Get recent login events
+            st.sidebar.markdown('---')
+            st.sidebar.markdown('**Recent Logins:**')
+            recent_logins = db.query(LoginEvent).order_by(LoginEvent.logged_in_at.desc()).limit(10).all()
+            if recent_logins:
+                for i, login in enumerate(recent_logins, 1):
+                    time_str = login.logged_in_at.strftime('%m/%d %H:%M')
+                    st.sidebar.markdown(f"**{i}.** `{time_str}` - **{login.username}** ({login.role})")
+            else:
+                st.sidebar.info('No recent logins found.')
+                
+        except Exception as e:
+            st.sidebar.error(f'Error loading activities: {str(e)}')
+        finally:
+            db.close()
 
 
