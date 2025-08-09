@@ -69,7 +69,7 @@ streamlit run main.py
 
 ## 🌐 Live Demo
 
-Visit the live application: [IQ Stats CRM on streamlit]([https://iq-stats-crm.streamlit.app/])
+Visit the live application: [IQ Stats CRM on streamlit](https://iq-stats-crm.streamlit.app/)
 
 ## 📖 User Manual
 
