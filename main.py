@@ -997,19 +997,37 @@ def generate_analytics_graphs(df, charts_data, date_str, title_prefix="Analytics
             
             # 6. Activity Heatmap
             if 'activity_heatmap' in charts_data and not charts_data['activity_heatmap'].empty:
-                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-                heat_data = charts_data['activity_heatmap']
+                heat_data = charts_data['activity_heatmap'].copy()
+                # Normalize columns
+                if 'day_of_week' not in heat_data.columns or 'hour' not in heat_data.columns:
+                    dt_col = None
+                    for candidate in ['timestamp', 'created_at', 'uploaded_at', 'archived_at', 'date']:
+                        if candidate in heat_data.columns:
+                            dt_col = candidate
+                            break
+                    if dt_col is not None:
+                        heat_data[dt_col] = pd.to_datetime(heat_data[dt_col], errors='coerce')
+                        heat_data['day_of_week'] = heat_data[dt_col].dt.day_name()
+                        heat_data['hour'] = heat_data[dt_col].dt.hour
+                    else:
+                        heat_data['day_of_week'] = 'Unknown'
+                        heat_data['hour'] = 0
+                if 'count' not in heat_data.columns:
+                    heat_data['count'] = 1
+                pivot_data = heat_data.pivot_table(index='hour', columns='day_of_week', values='count', fill_value=0)
                 
-                # Create heatmap
-                sns.heatmap(heat_data.pivot_table(index='hour', columns='day_of_week', values='count', fill_value=0),
-                           annot=True, fmt='d', cmap='YlOrRd', ax=ax)
-                ax.set_title(f'{title_prefix} - Activity Heatmap', fontsize=16, fontweight='bold')
-                ax.set_xlabel('Day of Week', fontsize=12)
-                ax.set_ylabel('Hour of Day', fontsize=12)
-                
-                plt.tight_layout()
-                pdf.savefig(fig)
-                plt.close()
+                fig = px.imshow(pivot_data.values,
+                               x=pivot_data.columns,
+                               y=pivot_data.index,
+                               title=f'{title_prefix} - Activity Heatmap',
+                               color_continuous_scale='YlOrRd',
+                               aspect="auto")
+                fig.update_layout(
+                    xaxis_title="Day of Week",
+                    yaxis_title="Hour of Day",
+                    template="plotly_white"
+                )
+                graphs['activity_heatmap.html'] = fig.to_html(include_plotlyjs='cdn')
             
             # 7. Trends Analysis (if available)
             if 'trends' in charts_data and not charts_data['trends'].empty:
@@ -1366,7 +1384,23 @@ def generate_analytics_pngs(df, charts_data, date_str, title_prefix="Analytics")
 
     if 'activity_heatmap' in charts_data and not charts_data['activity_heatmap'].empty:
         fig, ax = plt.subplots(figsize=(12, 8))
-        heat_data = charts_data['activity_heatmap']
+        heat_data = charts_data['activity_heatmap'].copy()
+        # Normalize columns
+        if 'day_of_week' not in heat_data.columns or 'hour' not in heat_data.columns:
+            dt_col = None
+            for candidate in ['timestamp', 'created_at', 'uploaded_at', 'archived_at', 'date']:
+                if candidate in heat_data.columns:
+                    dt_col = candidate
+                    break
+            if dt_col is not None:
+                heat_data[dt_col] = pd.to_datetime(heat_data[dt_col], errors='coerce')
+                heat_data['day_of_week'] = heat_data[dt_col].dt.day_name()
+                heat_data['hour'] = heat_data[dt_col].dt.hour
+            else:
+                heat_data['day_of_week'] = 'Unknown'
+                heat_data['hour'] = 0
+        if 'count' not in heat_data.columns:
+            heat_data['count'] = 1
         pivot = heat_data.pivot_table(index='hour', columns='day_of_week', values='count', fill_value=0)
         sns.heatmap(pivot, annot=True, fmt='d', cmap='YlOrRd', ax=ax)
         ax.set_title(f'{title_prefix} — Activity Heatmap ({date_str})', fontsize=16, fontweight='bold')
