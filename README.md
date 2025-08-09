@@ -69,7 +69,7 @@ streamlit run main.py
 
 ## 🌐 Live Demo
 
-Visit the live application: [IQ Stats CRM on Netlify](https://your-app-name.netlify.app)
+Visit the live application: [IQ Stats CRM on streamlit]([https://iq-stats-crm.streamlit.app/])
 
 ## 📖 User Manual
 
@@ -79,7 +79,7 @@ For detailed login credentials and usage instructions, see:
 
 ## 🔧 Configuration
 
-The application uses SQLite database by default. The database file will be created automatically on first run.
+The application uses SQLite as its default database. The database file will be created automatically on first run.
 
 ### Environment Variables
 
