@@ -325,6 +325,31 @@ def unarchive_lead(db, lead_id, unarchived_by):
         return True
     return False
 
+def delete_lead_from_db(db, lead_id, deleted_by, reason=None):
+    """Permanently delete a lead from database"""
+    lead = db.query(Lead).get(lead_id)
+    if lead:
+        # Log the deletion before removing
+        log_activity(db, lead_id, deleted_by, 'delete', detail=f'Lead permanently deleted: {reason}')
+        
+        # Delete related activities and comments first (due to foreign key constraints)
+        db.query(Activity).filter(Activity.lead_id == lead_id).delete()
+        db.query(Comment).filter(Comment.lead_id == lead_id).delete()
+        
+        # Delete the lead
+        db.delete(lead)
+        db.commit()
+        return True
+    return False
+
+def bulk_delete_leads_from_db(db, lead_ids, deleted_by, reason=None):
+    """Bulk delete multiple leads from database"""
+    deleted_count = 0
+    for lead_id in lead_ids:
+        if delete_lead_from_db(db, lead_id, deleted_by, reason):
+            deleted_count += 1
+    return deleted_count
+
 def bulk_archive_leads(db, lead_ids, archived_by, reason=None, archive_date=None):
     """Bulk archive multiple leads"""
     archived_count = 0
@@ -1863,6 +1888,140 @@ This package contains comprehensive technical analytics for system management.
                     else:
                         st.info('No leads match the unarchive criteria')
             
+            # Database Deletion Section (Danger Zone)
+            st.markdown('---')
+            st.write('**🗑️ Database Deletion (Danger Zone)**')
+            st.warning('⚠️ **WARNING**: This will permanently delete leads from the database. This action cannot be undone!')
+            
+            # Individual lead deletion
+            st.write('**Delete Individual Leads:**')
+            delete_selection = st.multiselect(
+                'Select leads to permanently delete:',
+                options=archived_leads_df.apply(lambda x: f"ID: {x['id']} - {x['name']} (Archived: {x['archived_date']})", axis=1).tolist(),
+                key='delete_selection'
+            )
+            
+            if delete_selection:
+                delete_reason = st.text_area('Deletion reason (required)', 
+                                           placeholder='Explain why these leads are being permanently deleted', 
+                                           key='delete_reason')
+                
+                if st.button('🗑️ Permanently Delete Selected Leads', type='secondary', key='delete_selected'):
+                    if delete_reason.strip():
+                        delete_ids = []
+                        for selection in delete_selection:
+                            lead_id = int(selection.split(' - ')[0].replace('ID: ', ''))
+                            delete_ids.append(lead_id)
+                        
+                        with get_session() as db:
+                            deleted_count = bulk_delete_leads_from_db(db, delete_ids, current_user.username, delete_reason.strip())
+                            
+                            if deleted_count > 0:
+                                st.success(f'✅ Successfully deleted {deleted_count} leads from database')
+                                st.rerun()
+                            else:
+                                st.error('❌ Failed to delete leads')
+                    else:
+                        st.error('❌ Please provide a deletion reason')
+            
+            # Bulk deletion options
+            st.write('**Bulk Delete Options:**')
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                bulk_delete_reason = st.selectbox('Delete by Archive Reason', 
+                                                options=['All'] + sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='bulk_delete_reason')
+                bulk_delete_agent = st.selectbox('Delete by Archived By', 
+                                               options=['All'] + sorted(archived_leads_df['archived_by'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='bulk_delete_agent')
+            
+            with col2:
+                bulk_delete_days = st.number_input('Delete leads archived within (days)', min_value=1, value=30, key='bulk_delete_days')
+                bulk_delete_limit = st.number_input('Max leads to delete (0 = no limit)', min_value=0, value=0, key='bulk_delete_limit')
+            
+            bulk_delete_reason_text = st.text_area('Bulk deletion reason (required)', 
+                                                 placeholder='Explain why these leads are being permanently deleted', 
+                                                 key='bulk_delete_reason_text')
+            
+            if st.button('🗑️ Bulk Delete by Criteria', type='secondary', key='bulk_delete_criteria'):
+                if bulk_delete_reason_text.strip():
+                    with get_session() as db:
+                        q = db.query(Lead).filter(Lead.is_archived == 'yes')
+                        
+                        if bulk_delete_reason != 'All':
+                            q = q.filter(Lead.archive_reason == bulk_delete_reason)
+                        if bulk_delete_agent != 'All':
+                            q = q.filter(Lead.archived_by == bulk_delete_agent)
+                        
+                        # Filter by archive date
+                        cutoff_date = datetime.utcnow() - pd.Timedelta(days=bulk_delete_days)
+                        q = q.filter(Lead.archived_at >= cutoff_date)
+                        
+                        if bulk_delete_limit > 0:
+                            q = q.limit(bulk_delete_limit)
+                        
+                        leads_to_delete = q.all()
+                        
+                        if leads_to_delete:
+                            lead_ids = [lead.id for lead in leads_to_delete]
+                            deleted_count = bulk_delete_leads_from_db(db, lead_ids, current_user.username, bulk_delete_reason_text.strip())
+                            
+                            if deleted_count > 0:
+                                st.success(f'✅ Successfully deleted {deleted_count} leads from database')
+                                st.rerun()
+                            else:
+                                st.error('❌ Failed to delete leads')
+                        else:
+                            st.info('No leads match the deletion criteria')
+                else:
+                    st.error('❌ Please provide a deletion reason')
+            
+            # Quick delete options
+            st.write('**Quick Delete Options:**')
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button('🗑️ Delete All Archived Leads', type='secondary', key='delete_all_archived'):
+                    st.error('⚠️ This will delete ALL archived leads! Are you sure?')
+                    confirm_delete_all = st.checkbox('I understand this will permanently delete ALL archived leads', key='confirm_delete_all')
+                    
+                    if confirm_delete_all:
+                        delete_all_reason = st.text_area('Reason for deleting all archived leads', 
+                                                       placeholder='Explain why all archived leads should be deleted', 
+                                                       key='delete_all_reason')
+                        
+                        if st.button('🗑️ Confirm Delete All', type='primary', key='confirm_delete_all_btn'):
+                            if delete_all_reason.strip():
+                                with get_session() as db:
+                                    all_archived = db.query(Lead).filter(Lead.is_archived == 'yes').all()
+                                    if all_archived:
+                                        lead_ids = [lead.id for lead in all_archived]
+                                        deleted_count = bulk_delete_leads_from_db(db, lead_ids, current_user.username, delete_all_reason.strip())
+                                        st.success(f'✅ Successfully deleted {deleted_count} leads from database')
+                                        st.rerun()
+                                    else:
+                                        st.info('No archived leads found')
+                            else:
+                                st.error('❌ Please provide a deletion reason')
+            
+            with col2:
+                quick_delete_days = st.selectbox('Delete archives older than', [30, 60, 90, 180, 365], key='quick_delete_days')
+                if st.button(f'🗑️ Delete Archives Older Than {quick_delete_days} Days', type='secondary', key='quick_delete_old'):
+                    cutoff_date = datetime.utcnow() - pd.Timedelta(days=quick_delete_days)
+                    
+                    with get_session() as db:
+                        old_archived = db.query(Lead).filter(
+                            Lead.is_archived == 'yes',
+                            Lead.archived_at <= cutoff_date
+                        ).all()
+                        
+                        if old_archived:
+                            lead_ids = [lead.id for lead in old_archived]
+                            deleted_count = bulk_delete_leads_from_db(db, lead_ids, current_user.username, f'Automatic cleanup - archives older than {quick_delete_days} days')
+                            st.success(f'✅ Successfully deleted {deleted_count} old archived leads')
+                            st.rerun()
+                        else:
+                            st.info(f'No archived leads older than {quick_delete_days} days found')
+            
             # Enhanced Export Archived Leads
             st.write('**📊 Enhanced Export Archived Leads**')
             
@@ -2600,6 +2759,61 @@ This package contains comprehensive technical analytics for system management.
                                 st.rerun()
                             else:
                                 st.info(f'No leads {age_label} old found')
+            
+            # Quick Delete Actions
+            st.write('**🗑️ Quick Delete Actions**')
+            st.warning('⚠️ **WARNING**: These actions will permanently delete leads from the database!')
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write('**Delete by Status:**')
+                delete_status = st.selectbox('Select status to delete', ['new', 'contacted', 'qualified', 'won', 'lost'], key='delete_status')
+                
+                if st.button(f'🗑️ Delete All "{delete_status}" Status', type='secondary', key='delete_by_status'):
+                    delete_status_reason = st.text_area(f'Reason for deleting all {delete_status} leads', 
+                                                      placeholder='Explain why these leads should be deleted', 
+                                                      key='delete_status_reason')
+                    
+                    if st.button(f'🗑️ Confirm Delete All {delete_status}', type='primary', key='confirm_delete_status'):
+                        if delete_status_reason.strip():
+                            with get_session() as db:
+                                q = db.query(Lead).filter(
+                                    sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                                    Lead.status == delete_status
+                                )
+                                leads_to_delete = q.all()
+                                
+                                if leads_to_delete:
+                                    lead_ids = [lead.id for lead in leads_to_delete]
+                                    deleted_count = bulk_delete_leads_from_db(db, lead_ids, current_user.username, delete_status_reason.strip())
+                                    st.success(f'✅ Successfully deleted {deleted_count} {delete_status} leads')
+                                    st.rerun()
+                                else:
+                                    st.info(f'No {delete_status} leads found')
+                        else:
+                            st.error('❌ Please provide a deletion reason')
+            
+            with col2:
+                st.write('**Delete by Age:**')
+                delete_age_days = st.selectbox('Delete leads older than', [30, 60, 90, 180, 365], key='delete_age_days')
+                
+                if st.button(f'🗑️ Delete Leads Older Than {delete_age_days} Days', type='secondary', key='delete_by_age'):
+                    cutoff_date = datetime.utcnow() - pd.Timedelta(days=delete_age_days)
+                    
+                    with get_session() as db:
+                        old_leads = db.query(Lead).filter(
+                            sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                            Lead.uploaded_at <= cutoff_date
+                        ).all()
+                        
+                        if old_leads:
+                            lead_ids = [lead.id for lead in old_leads]
+                            deleted_count = bulk_delete_leads_from_db(db, lead_ids, current_user.username, f'Automatic cleanup - leads older than {delete_age_days} days')
+                            st.success(f'✅ Successfully deleted {deleted_count} old leads')
+                            st.rerun()
+                        else:
+                            st.info(f'No leads older than {delete_age_days} days found')
     
     with archive_tab4:
         st.write('**Archive Leads by Date**')
