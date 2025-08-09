@@ -1748,7 +1748,7 @@ This package contains comprehensive technical analytics for system management.
                             'Customer request',
                             'System cleanup',
                             'Other'
-                        ])
+                        ], key='archive_reason_individual')
                         custom_reason = st.text_area('Custom reason (optional)', 
                                                    placeholder='Add additional details about why this lead is being archived')
                         archive_date = st.date_input('Archive Date', value=date.today())
@@ -1826,13 +1826,13 @@ This package contains comprehensive technical analytics for system management.
             
             with col1:
                 bulk_unarchive_reason = st.selectbox('Unarchive by Archive Reason', 
-                                                   options=['All'] + sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'])
+                                                   options=['All'] + sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='bulk_unarchive_reason')
                 bulk_unarchive_agent = st.selectbox('Unarchive by Archived By', 
-                                                  options=['All'] + sorted(archived_leads_df['archived_by'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'])
+                                                  options=['All'] + sorted(archived_leads_df['archived_by'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='bulk_unarchive_agent')
             
             with col2:
-                bulk_unarchive_days = st.number_input('Unarchive leads archived within (days)', min_value=1, value=7)
-                bulk_unarchive_limit = st.number_input('Max leads to unarchive (0 = no limit)', min_value=0, value=0)
+                bulk_unarchive_days = st.number_input('Unarchive leads archived within (days)', min_value=1, value=7, key='bulk_unarchive_days')
+                bulk_unarchive_limit = st.number_input('Max leads to unarchive (0 = no limit)', min_value=0, value=0, key='bulk_unarchive_limit')
             
             if st.button('🔄 Bulk Unarchive by Criteria'):
                 with get_session() as db:
@@ -1921,8 +1921,8 @@ This package contains comprehensive technical analytics for system management.
                                                      help='Leave empty to include all contact methods')
             
             with col2:
-                smart_days_old = st.number_input('Archive leads older than (days)', min_value=1, value=30)
-                smart_max_leads = st.number_input('Maximum leads to archive (0 = no limit)', min_value=0, value=0, help='Limit the number of leads to prevent accidental bulk operations')
+                smart_days_old = st.number_input('Archive leads older than (days)', min_value=1, value=30, key='smart_days_old')
+                smart_max_leads = st.number_input('Maximum leads to archive (0 = no limit)', min_value=0, value=0, help='Limit the number of leads to prevent accidental bulk operations', key='smart_max_leads')
                 smart_reason = st.selectbox('Archive Reason', [
                     'Smart cleanup - old leads',
                     'Completed/Closed leads',
@@ -1932,7 +1932,7 @@ This package contains comprehensive technical analytics for system management.
                     'Performance optimization',
                     'Data cleanup',
                     'Other'
-                ])
+                ], key='smart_reason')
                 custom_reason = st.text_area('Custom reason details', placeholder='Add specific details about this bulk archive operation')
             
             # Preview functionality
@@ -2033,7 +2033,7 @@ This package contains comprehensive technical analytics for system management.
                     'Historical data management',
                     'Performance optimization',
                     'Other'
-                ])
+                ], key='date_archive_reason')
             
             # Preview date-based archive
             if st.button('📅 Preview Date-Based Archive'):
@@ -2117,7 +2117,7 @@ This package contains comprehensive technical analytics for system management.
                 agent_bulk_statuses = st.multiselect('Statuses to Archive',
                                                    options=['new', 'contacted', 'qualified', 'lost', 'won'],
                                                    default=['new', 'contacted'])
-                agent_bulk_days = st.number_input('Archive leads older than (days)', min_value=1, value=30)
+                agent_bulk_days = st.number_input('Archive leads older than (days)', min_value=1, value=30, key='agent_bulk_days')
             
             with col2:
                 agent_bulk_reason = st.selectbox('Agent Archive Reason', [
@@ -2126,8 +2126,8 @@ This package contains comprehensive technical analytics for system management.
                     'Agent inactive leads',
                     'Agent data cleanup',
                     'Other'
-                ])
-                agent_bulk_limit = st.number_input('Max leads per agent (0 = no limit)', min_value=0, value=0)
+                ], key='agent_bulk_reason')
+                agent_bulk_limit = st.number_input('Max leads per agent (0 = no limit)', min_value=0, value=0, key='agent_bulk_limit')
             
             if st.button('👥 Preview Agent-Based Archive'):
                 if not agent_bulk_selection:
@@ -2307,7 +2307,7 @@ This package contains comprehensive technical analytics for system management.
                 'Old leads cleanup',
                 'System maintenance',
                 'Other'
-            ])
+            ], key='date_archive_reason_tab4')
         
         if st.button('🗄️ Archive Leads by Date Range'):
             with get_session() as db:
