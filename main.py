@@ -1820,6 +1820,49 @@ This package contains comprehensive technical analytics for system management.
                     else:
                         st.error('❌ Failed to unarchive leads')
             
+            # Bulk unarchive options
+            st.write('**Bulk Unarchive Options:**')
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                bulk_unarchive_reason = st.selectbox('Unarchive by Archive Reason', 
+                                                   options=['All'] + sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'])
+                bulk_unarchive_agent = st.selectbox('Unarchive by Archived By', 
+                                                  options=['All'] + sorted(archived_leads_df['archived_by'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'])
+            
+            with col2:
+                bulk_unarchive_days = st.number_input('Unarchive leads archived within (days)', min_value=1, value=7)
+                bulk_unarchive_limit = st.number_input('Max leads to unarchive (0 = no limit)', min_value=0, value=0)
+            
+            if st.button('🔄 Bulk Unarchive by Criteria'):
+                with get_session() as db:
+                    q = db.query(Lead).filter(Lead.is_archived == 'yes')
+                    
+                    if bulk_unarchive_reason != 'All':
+                        q = q.filter(Lead.archive_reason == bulk_unarchive_reason)
+                    if bulk_unarchive_agent != 'All':
+                        q = q.filter(Lead.archived_by == bulk_unarchive_agent)
+                    
+                    # Filter by archive date
+                    cutoff_date = datetime.utcnow() - pd.Timedelta(days=bulk_unarchive_days)
+                    q = q.filter(Lead.archived_at >= cutoff_date)
+                    
+                    if bulk_unarchive_limit > 0:
+                        q = q.limit(bulk_unarchive_limit)
+                    
+                    leads_to_unarchive = q.all()
+                    
+                    if leads_to_unarchive:
+                        unarchived_count = 0
+                        for lead in leads_to_unarchive:
+                            if unarchive_lead(db, lead.id, current_user.username):
+                                unarchived_count += 1
+                        
+                        st.success(f'✅ Successfully unarchived {unarchived_count} leads')
+                        st.rerun()
+                    else:
+                        st.info('No leads match the unarchive criteria')
+            
             # Export archived leads
             st.write('**Export Archived Leads**')
             col1, col2 = st.columns(2)
@@ -1855,51 +1898,400 @@ This package contains comprehensive technical analytics for system management.
             st.info('No archived leads found')
     
     with archive_tab3:
-        st.write('**Bulk Archive by Criteria**')
+        st.write('**🚀 Advanced Bulk Archiving System**')
         
-        # Bulk archive options
-        col1, col2 = st.columns(2)
-        with col1:
-            bulk_agent = st.selectbox('Archive by Sales Agent', 
-                                    options=['All'] + sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else ['All'])
-            bulk_status = st.selectbox('Archive by Status', 
-                                     options=['All'] + sorted(active_leads_df['status'].dropna().unique().tolist()) if not active_leads_df.empty else ['All'])
-        with col2:
-            bulk_days_old = st.number_input('Archive leads older than (days)', min_value=1, value=30)
-            bulk_reason = st.selectbox('Bulk Archive Reason', [
-                'System cleanup - old leads',
-                'Completed/Closed leads',
-                'No longer relevant',
-                'Duplicate cleanup',
-                'Other'
-            ])
+        # Create sub-tabs for different bulk archiving methods
+        bulk_tab1, bulk_tab2, bulk_tab3, bulk_tab4 = st.tabs(['📊 Smart Bulk Archive', '📅 Date-Based Bulk', '👥 Agent-Based Bulk', '⚡ Quick Bulk Actions'])
         
-        if st.button('🗄️ Bulk Archive by Criteria'):
-            with get_session() as db:
-                # Build query for bulk archive
-                q = db.query(Lead).filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'))
-                
-                if bulk_agent != 'All':
-                    q = q.filter(Lead.sales_agent == bulk_agent)
-                if bulk_status != 'All':
-                    q = q.filter(Lead.status == bulk_status)
-                
-                # Filter by age
-                cutoff_date = datetime.utcnow() - pd.Timedelta(days=bulk_days_old)
-                q = q.filter(Lead.uploaded_at <= cutoff_date)
-                
-                leads_to_archive = q.all()
-                
-                if leads_to_archive:
-                    lead_ids = [lead.id for lead in leads_to_archive]
-                    archived_count = bulk_archive_leads(
-                        db, lead_ids, current_user.username, 
-                        bulk_reason, datetime.utcnow()
+        with bulk_tab1:
+            st.write('**Smart Bulk Archive - Multiple Criteria**')
+            
+            # Advanced filtering options
+            col1, col2 = st.columns(2)
+            with col1:
+                smart_agents = st.multiselect('Select Sales Agents', 
+                                            options=sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else [],
+                                            help='Leave empty to select all agents')
+                smart_statuses = st.multiselect('Select Statuses', 
+                                              options=['new', 'contacted', 'qualified', 'lost', 'won'],
+                                              default=['new', 'contacted'],
+                                              help='Select which statuses to archive')
+                smart_contact_methods = st.multiselect('Select Contact Methods',
+                                                     options=sorted(active_leads_df['contact'].dropna().unique().tolist()) if not active_leads_df.empty else [],
+                                                     help='Leave empty to include all contact methods')
+            
+            with col2:
+                smart_days_old = st.number_input('Archive leads older than (days)', min_value=1, value=30)
+                smart_max_leads = st.number_input('Maximum leads to archive (0 = no limit)', min_value=0, value=0, help='Limit the number of leads to prevent accidental bulk operations')
+                smart_reason = st.selectbox('Archive Reason', [
+                    'Smart cleanup - old leads',
+                    'Completed/Closed leads',
+                    'No longer relevant',
+                    'Duplicate cleanup',
+                    'System maintenance',
+                    'Performance optimization',
+                    'Data cleanup',
+                    'Other'
+                ])
+                custom_reason = st.text_area('Custom reason details', placeholder='Add specific details about this bulk archive operation')
+            
+            # Preview functionality
+            if st.button('🔍 Preview Leads to Archive'):
+                with get_session() as db:
+                    q = db.query(Lead).filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'))
+                    
+                    if smart_agents:
+                        q = q.filter(Lead.sales_agent.in_(smart_agents))
+                    if smart_statuses:
+                        q = q.filter(Lead.status.in_(smart_statuses))
+                    if smart_contact_methods:
+                        q = q.filter(Lead.contact.in_(smart_contact_methods))
+                    
+                    # Filter by age
+                    cutoff_date = datetime.utcnow() - pd.Timedelta(days=smart_days_old)
+                    q = q.filter(Lead.uploaded_at <= cutoff_date)
+                    
+                    preview_leads = q.limit(100).all()
+                    
+                    if preview_leads:
+                        preview_df = pd.DataFrame([{
+                            'ID': lead.id,
+                            'Name': lead.name,
+                            'Agent': lead.sales_agent,
+                            'Status': lead.status,
+                            'Contact': lead.contact,
+                            'Uploaded': lead.uploaded_at.strftime('%Y-%m-%d') if lead.uploaded_at else '',
+                            'Age (days)': (datetime.utcnow() - lead.uploaded_at).days if lead.uploaded_at else 0
+                        } for lead in preview_leads])
+                        
+                        st.write(f'**Preview of leads to archive (showing first 100):**')
+                        st.dataframe(preview_df, use_container_width=True)
+                        
+                        total_count = q.count()
+                        st.info(f'📊 Total leads matching criteria: {total_count}')
+                        
+                        if smart_max_leads > 0 and total_count > smart_max_leads:
+                            st.warning(f'⚠️ Will archive only {smart_max_leads} leads (limit set)')
+                    else:
+                        st.info('No leads match the selected criteria')
+            
+            # Execute bulk archive
+            if st.button('🗄️ Execute Smart Bulk Archive'):
+                with get_session() as db:
+                    q = db.query(Lead).filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'))
+                    
+                    if smart_agents:
+                        q = q.filter(Lead.sales_agent.in_(smart_agents))
+                    if smart_statuses:
+                        q = q.filter(Lead.status.in_(smart_statuses))
+                    if smart_contact_methods:
+                        q = q.filter(Lead.contact.in_(smart_contact_methods))
+                    
+                    # Filter by age
+                    cutoff_date = datetime.utcnow() - pd.Timedelta(days=smart_days_old)
+                    q = q.filter(Lead.uploaded_at <= cutoff_date)
+                    
+                    if smart_max_leads > 0:
+                        q = q.limit(smart_max_leads)
+                    
+                    leads_to_archive = q.all()
+                    
+                    if leads_to_archive:
+                        lead_ids = [lead.id for lead in leads_to_archive]
+                        final_reason = smart_reason
+                        if custom_reason.strip():
+                            final_reason += f" - {custom_reason.strip()}"
+                        
+                        archived_count = bulk_archive_leads(
+                            db, lead_ids, current_user.username, 
+                            final_reason, datetime.utcnow()
+                        )
+                        
+                        st.success(f'✅ Successfully archived {archived_count} leads!')
+                        st.info(f'📋 Archive reason: {final_reason}')
+                        st.rerun()
+                    else:
+                        st.info('No leads match the selected criteria')
+        
+        with bulk_tab2:
+            st.write('**Date-Based Bulk Archiving**')
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                date_archive_start = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=60))
+                date_archive_end = st.date_input('End Date', value=date.today())
+                date_archive_agents = st.multiselect('Filter by Agents (optional)',
+                                                   options=sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else [])
+            with col2:
+                date_archive_statuses = st.multiselect('Filter by Status (optional)',
+                                                     options=['new', 'contacted', 'qualified', 'lost', 'won'],
+                                                     default=['new', 'contacted'])
+                date_archive_reason = st.selectbox('Date Archive Reason', [
+                    'Date-based cleanup',
+                    'Old leads cleanup',
+                    'System maintenance',
+                    'Historical data management',
+                    'Performance optimization',
+                    'Other'
+                ])
+            
+            # Preview date-based archive
+            if st.button('📅 Preview Date-Based Archive'):
+                with get_session() as db:
+                    start_datetime = datetime.combine(date_archive_start, datetime.min.time())
+                    end_datetime = datetime.combine(date_archive_end, datetime.max.time())
+                    
+                    q = db.query(Lead).filter(
+                        sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                        Lead.uploaded_at >= start_datetime,
+                        Lead.uploaded_at <= end_datetime
                     )
-                    st.success(f'✅ Bulk archived {archived_count} leads')
-                    st.rerun()
+                    
+                    if date_archive_agents:
+                        q = q.filter(Lead.sales_agent.in_(date_archive_agents))
+                    if date_archive_statuses:
+                        q = q.filter(Lead.status.in_(date_archive_statuses))
+                    
+                    preview_leads = q.limit(100).all()
+                    
+                    if preview_leads:
+                        preview_df = pd.DataFrame([{
+                            'ID': lead.id,
+                            'Name': lead.name,
+                            'Agent': lead.sales_agent,
+                            'Status': lead.status,
+                            'Uploaded': lead.uploaded_at.strftime('%Y-%m-%d %H:%M') if lead.uploaded_at else ''
+                        } for lead in preview_leads])
+                        
+                        st.write(f'**Preview of leads to archive from {date_archive_start} to {date_archive_end}:**')
+                        st.dataframe(preview_df, use_container_width=True)
+                        
+                        total_count = q.count()
+                        st.info(f'📊 Total leads in date range: {total_count}')
+                    else:
+                        st.info('No leads found in the specified date range')
+            
+            # Execute date-based archive
+            if st.button('🗄️ Execute Date-Based Archive'):
+                with get_session() as db:
+                    start_datetime = datetime.combine(date_archive_start, datetime.min.time())
+                    end_datetime = datetime.combine(date_archive_end, datetime.max.time())
+                    
+                    q = db.query(Lead).filter(
+                        sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                        Lead.uploaded_at >= start_datetime,
+                        Lead.uploaded_at <= end_datetime
+                    )
+                    
+                    if date_archive_agents:
+                        q = q.filter(Lead.sales_agent.in_(date_archive_agents))
+                    if date_archive_statuses:
+                        q = q.filter(Lead.status.in_(date_archive_statuses))
+                    
+                    leads_in_range = q.all()
+                    
+                    if leads_in_range:
+                        lead_ids = [lead.id for lead in leads_in_range]
+                        archived_count = bulk_archive_leads(
+                            db, lead_ids, current_user.username, 
+                            f"{date_archive_reason} ({date_archive_start} to {date_archive_end})", 
+                            datetime.utcnow()
+                        )
+                        st.success(f'✅ Successfully archived {archived_count} leads from {date_archive_start} to {date_archive_end}')
+                        st.rerun()
+                    else:
+                        st.info(f'No leads found in date range {date_archive_start} to {date_archive_end}')
+        
+        with bulk_tab3:
+            st.write('**Agent-Based Bulk Archiving**')
+            
+            # Get all sales agents
+            with get_session() as db:
+                all_agents = [u.username for u in db.query(User).filter(User.role=='salesman').order_by(User.username.asc()).all()]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                agent_bulk_selection = st.multiselect('Select Agents to Archive From',
+                                                    options=all_agents,
+                                                    help='Select which agents\' leads to archive')
+                agent_bulk_statuses = st.multiselect('Statuses to Archive',
+                                                   options=['new', 'contacted', 'qualified', 'lost', 'won'],
+                                                   default=['new', 'contacted'])
+                agent_bulk_days = st.number_input('Archive leads older than (days)', min_value=1, value=30)
+            
+            with col2:
+                agent_bulk_reason = st.selectbox('Agent Archive Reason', [
+                    'Agent performance cleanup',
+                    'Agent reassignment',
+                    'Agent inactive leads',
+                    'Agent data cleanup',
+                    'Other'
+                ])
+                agent_bulk_limit = st.number_input('Max leads per agent (0 = no limit)', min_value=0, value=0)
+            
+            if st.button('👥 Preview Agent-Based Archive'):
+                if not agent_bulk_selection:
+                    st.warning('Please select at least one agent')
                 else:
-                    st.info('No leads match the bulk archive criteria')
+                    with get_session() as db:
+                        cutoff_date = datetime.utcnow() - pd.Timedelta(days=agent_bulk_days)
+                        
+                        agent_summary = []
+                        for agent in agent_bulk_selection:
+                            q = db.query(Lead).filter(
+                                sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                                Lead.sales_agent == agent,
+                                Lead.status.in_(agent_bulk_statuses),
+                                Lead.uploaded_at <= cutoff_date
+                            )
+                            count = q.count()
+                            agent_summary.append({'Agent': agent, 'Leads to Archive': count})
+                        
+                        summary_df = pd.DataFrame(agent_summary)
+                        st.write('**Agent Archive Summary:**')
+                        st.dataframe(summary_df, use_container_width=True)
+                        
+                        total_leads = sum(item['Leads to Archive'] for item in agent_summary)
+                        st.info(f'📊 Total leads to archive: {total_leads}')
+            
+            if st.button('🗄️ Execute Agent-Based Archive'):
+                if not agent_bulk_selection:
+                    st.warning('Please select at least one agent')
+                else:
+                    with get_session() as db:
+                        cutoff_date = datetime.utcnow() - pd.Timedelta(days=agent_bulk_days)
+                        total_archived = 0
+                        
+                        for agent in agent_bulk_selection:
+                            q = db.query(Lead).filter(
+                                sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                                Lead.sales_agent == agent,
+                                Lead.status.in_(agent_bulk_statuses),
+                                Lead.uploaded_at <= cutoff_date
+                            )
+                            
+                            if agent_bulk_limit > 0:
+                                q = q.limit(agent_bulk_limit)
+                            
+                            leads_to_archive = q.all()
+                            
+                            if leads_to_archive:
+                                lead_ids = [lead.id for lead in leads_to_archive]
+                                archived_count = bulk_archive_leads(
+                                    db, lead_ids, current_user.username, 
+                                    f"{agent_bulk_reason} - Agent: {agent}", 
+                                    datetime.utcnow()
+                                )
+                                total_archived += archived_count
+                        
+                        st.success(f'✅ Successfully archived {total_archived} leads from {len(agent_bulk_selection)} agents')
+                        st.rerun()
+        
+        with bulk_tab4:
+            st.write('**Quick Bulk Actions**')
+            
+            # Quick action buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write('**Quick Archive Actions:**')
+                
+                if st.button('🗄️ Archive All Old Leads (60+ days)'):
+                    with get_session() as db:
+                        cutoff_date = datetime.utcnow() - pd.Timedelta(days=60)
+                        q = db.query(Lead).filter(
+                            sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                            Lead.uploaded_at <= cutoff_date
+                        )
+                        leads_to_archive = q.all()
+                        
+                        if leads_to_archive:
+                            lead_ids = [lead.id for lead in leads_to_archive]
+                            archived_count = bulk_archive_leads(
+                                db, lead_ids, current_user.username, 
+                                'Quick action - Old leads (60+ days)', 
+                                datetime.utcnow()
+                            )
+                            st.success(f'✅ Archived {archived_count} old leads')
+                            st.rerun()
+                        else:
+                            st.info('No old leads found')
+                
+                if st.button('🗄️ Archive All "Lost" Status'):
+                    with get_session() as db:
+                        q = db.query(Lead).filter(
+                            sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                            Lead.status == 'lost'
+                        )
+                        leads_to_archive = q.all()
+                        
+                        if leads_to_archive:
+                            lead_ids = [lead.id for lead in leads_to_archive]
+                            archived_count = bulk_archive_leads(
+                                db, lead_ids, current_user.username, 
+                                'Quick action - All lost leads', 
+                                datetime.utcnow()
+                            )
+                            st.success(f'✅ Archived {archived_count} lost leads')
+                            st.rerun()
+                        else:
+                            st.info('No lost leads found')
+            
+            with col2:
+                st.write('**Quick Archive by Status:**')
+                
+                quick_status = st.selectbox('Select Status to Archive', ['new', 'contacted', 'qualified', 'won', 'lost'])
+                
+                if st.button(f'🗄️ Archive All "{quick_status}" Status'):
+                    with get_session() as db:
+                        q = db.query(Lead).filter(
+                            sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                            Lead.status == quick_status
+                        )
+                        leads_to_archive = q.all()
+                        
+                        if leads_to_archive:
+                            lead_ids = [lead.id for lead in leads_to_archive]
+                            archived_count = bulk_archive_leads(
+                                db, lead_ids, current_user.username, 
+                                f'Quick action - All {quick_status} leads', 
+                                datetime.utcnow()
+                            )
+                            st.success(f'✅ Archived {archived_count} {quick_status} leads')
+                            st.rerun()
+                        else:
+                            st.info(f'No {quick_status} leads found')
+                
+                # Archive by age ranges
+                st.write('**Quick Archive by Age:**')
+                age_ranges = [
+                    ('30+ days', 30),
+                    ('60+ days', 60),
+                    ('90+ days', 90),
+                    ('180+ days', 180)
+                ]
+                
+                for age_label, age_days in age_ranges:
+                    if st.button(f'🗄️ Archive {age_label}'):
+                        with get_session() as db:
+                            cutoff_date = datetime.utcnow() - pd.Timedelta(days=age_days)
+                            q = db.query(Lead).filter(
+                                sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                                Lead.uploaded_at <= cutoff_date
+                            )
+                            leads_to_archive = q.all()
+                            
+                            if leads_to_archive:
+                                lead_ids = [lead.id for lead in leads_to_archive]
+                                archived_count = bulk_archive_leads(
+                                    db, lead_ids, current_user.username, 
+                                    f'Quick action - {age_label} old leads', 
+                                    datetime.utcnow()
+                                )
+                                st.success(f'✅ Archived {archived_count} leads ({age_label})')
+                                st.rerun()
+                            else:
+                                st.info(f'No leads {age_label} old found')
     
     with archive_tab4:
         st.write('**Archive Leads by Date**')
