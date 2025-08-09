@@ -1313,37 +1313,36 @@ elif role == 'ceo':
 else:
     st.write('Role not supported in UI')
 
-# Footer: activity log quick view for all roles
+# Recent Activity Section
 st.sidebar.markdown('---')
-if st.sidebar.checkbox('Show recent activity'):
+st.sidebar.markdown('### 📊 Recent Activity')
+if st.sidebar.checkbox('Show recent activity', value=True):
     db = get_session()
-    acts = db.query(Activity).order_by(Activity.timestamp.desc()).limit(50).all()
-    for a in acts:
-        st.sidebar.write(f"{a.timestamp:%Y-%m-%d %H:%M} — {a.actor} — {a.action} — Lead {a.lead_id}")
-    db.close()
+    try:
+        # Get recent activities
+        acts = db.query(Activity).order_by(Activity.timestamp.desc()).limit(20).all()
+        if acts:
+            st.sidebar.markdown('**Latest System Activities:**')
+            for i, a in enumerate(acts, 1):
+                time_str = a.timestamp.strftime('%m/%d %H:%M')
+                st.sidebar.markdown(f"**{i}.** `{time_str}` - **{a.actor}** {a.action} Lead #{a.lead_id}")
+        else:
+            st.sidebar.info('No recent activities found.')
+        
+        # Get recent login events
+        st.sidebar.markdown('---')
+        st.sidebar.markdown('**Recent Logins:**')
+        recent_logins = db.query(LoginEvent).order_by(LoginEvent.logged_in_at.desc()).limit(10).all()
+        if recent_logins:
+            for i, login in enumerate(recent_logins, 1):
+                time_str = login.logged_in_at.strftime('%m/%d %H:%M')
+                st.sidebar.markdown(f"**{i}.** `{time_str}` - **{login.username}** ({login.role})")
+        else:
+            st.sidebar.info('No recent logins found.')
+            
+    except Exception as e:
+        st.sidebar.error(f'Error loading activities: {str(e)}')
+    finally:
+        db.close()
 
-# Dockerfile / deployment notes
-st.sidebar.markdown('---')
-st.sidebar.markdown('**Deployment notes**')
-st.sidebar.code('''
-# Dockerfile (simple)
-FROM python:3.11-slim
-WORKDIR /app
-COPY . /app
-RUN pip install -r requirements.txt
-EXPOSE 8501
-CMD ["streamlit","run","streamlit_crm_full.py","--server.port","8501","--server.address","0.0.0.0"]
-''')
 
-st.sidebar.markdown('Requirements (example)')
-st.sidebar.code('''
-streamlit
-pandas
-sqlalchemy
-openpyxl
-plotly
-passlib
-python-dateutil
-''')
-
-st.sidebar.markdown('Built for demo — I can harden auth, add SSO, multi-tenant support, cloud DB (Postgres), and background workers for emails and integrations. Ask which next!')
