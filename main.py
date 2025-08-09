@@ -893,7 +893,7 @@ def generate_analytics_graphs(df, charts_data, date_str, title_prefix="Analytics
         import matplotlib.pyplot as plt
         import seaborn as sns
         from matplotlib.backends.backend_pdf import PdfPages
-        import io
+        # Removed local 'import io' to avoid shadowing the module-level import
         
         # Create a PDF with multiple graphs
         pdf_buffer = io.BytesIO()
@@ -1054,7 +1054,7 @@ def generate_analytics_graphs(df, charts_data, date_str, title_prefix="Analytics
             Total Leads: {len(df)}
             Date Range: {df['uploaded_at'].min().strftime('%Y-%m-%d') if not df.empty else 'N/A'} to {df['uploaded_at'].max().strftime('%Y-%m-%d') if not df.empty else 'N/A'}
             Active Agents: {len(df['sales_agent'].unique()) if not df.empty else 0}
-            Conversion Rate: {(df['status'] == 'won').sum() / len(df) * 100:.1f}% if not df.empty else 0%
+            Conversion Rate: {((df['status'] == 'won').sum() / len(df) * 100):.1f}% if not df.empty else 0%
             """
             ax1.text(0.1, 0.5, summary_text, fontsize=14, verticalalignment='center',
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
@@ -1106,7 +1106,7 @@ Summary Statistics:
 - Total Leads: {len(df)}
 - Date Range: {df['uploaded_at'].min().strftime('%Y-%m-%d') if not df.empty else 'N/A'} to {df['uploaded_at'].max().strftime('%Y-%m-%d') if not df.empty else 'N/A'}
 - Active Agents: {len(df['sales_agent'].unique()) if not df.empty else 0}
-- Conversion Rate: {(df['status'] == 'won').sum() / len(df) * 100:.1f}% if not df.empty else 0%
+- Conversion Rate: {((df['status'] == 'won').sum() / len(df) * 100):.1f}% if not df.empty else 0%
 
 Chart Data Available:
 {chr(10).join([f"- {chart_name}: {len(chart_df)} records" for chart_name, chart_df in charts_data.items() if isinstance(chart_df, pd.DataFrame)])}
