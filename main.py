@@ -1751,7 +1751,7 @@ This package contains comprehensive technical analytics for system management.
                         ], key='archive_reason_individual')
                         custom_reason = st.text_area('Custom reason (optional)', 
                                                    placeholder='Add additional details about why this lead is being archived')
-                        archive_date = st.date_input('Archive Date', value=date.today())
+                        archive_date = st.date_input('Archive Date', value=date.today(), key='archive_date_individual')
                         
                         if st.form_submit_button('🗄️ Archive Selected Leads'):
                             if lead_ids:
@@ -1863,37 +1863,345 @@ This package contains comprehensive technical analytics for system management.
                     else:
                         st.info('No leads match the unarchive criteria')
             
-            # Export archived leads
-            st.write('**Export Archived Leads**')
-            col1, col2 = st.columns(2)
-            with col1:
-                export_start_date = st.date_input('Export from date', value=date.today() - pd.Timedelta(days=30))
-                export_end_date = st.date_input('Export to date', value=date.today())
-            with col2:
-                export_format = st.selectbox('Export format', ['Excel', 'CSV'])
-                if st.button('📊 Export Archived Leads Report'):
+            # Enhanced Export Archived Leads
+            st.write('**📊 Enhanced Export Archived Leads**')
+            
+            # Export options tabs
+            export_tab1, export_tab2, export_tab3 = st.tabs(['📅 Date Range Export', '📋 Quick Exports', '📈 Analytics Export'])
+            
+            with export_tab1:
+                st.write('**Export by Date Range**')
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    export_start_date = st.date_input('Export from date', value=date.today() - pd.Timedelta(days=30), key='export_start_date')
+                    export_format = st.selectbox('Export format', ['Excel', 'CSV'], key='export_format')
+                with col2:
+                    export_end_date = st.date_input('Export to date', value=date.today(), key='export_end_date')
+                    export_include_analytics = st.checkbox('Include analytics summary', value=True, key='export_analytics')
+                with col3:
+                    export_filter_reason = st.selectbox('Filter by archive reason', 
+                                                      options=['All'] + sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='export_filter_reason')
+                    export_filter_agent = st.selectbox('Filter by archived by', 
+                                                     options=['All'] + sorted(archived_leads_df['archived_by'].dropna().unique().tolist()) if not archived_leads_df.empty else ['All'], key='export_filter_agent')
+                
+                if st.button('📊 Export Archived Leads Report', key='export_date_range'):
                     with get_session() as db:
                         start_datetime = datetime.combine(export_start_date, datetime.min.time())
                         end_datetime = datetime.combine(export_end_date, datetime.max.time())
                         
-                        if export_format == 'Excel':
-                            excel_data = export_archived_leads_report(db, (start_datetime, end_datetime), 'excel')
-                            filename = f"Archived_Leads_{export_start_date}_{export_end_date}.xlsx"
+                        # Build enhanced query with filters
+                        q = db.query(Lead).filter(
+                            Lead.is_archived == 'yes',
+                            Lead.archived_at >= start_datetime,
+                            Lead.archived_at <= end_datetime
+                        )
+                        
+                        if export_filter_reason != 'All':
+                            q = q.filter(Lead.archive_reason == export_filter_reason)
+                        if export_filter_agent != 'All':
+                            q = q.filter(Lead.archived_by == export_filter_agent)
+                        
+                        filtered_leads = q.all()
+                        
+                        if filtered_leads:
+                            # Create enhanced export data
+                            export_data = []
+                            for lead in filtered_leads:
+                                export_data.append({
+                                    'Lead ID': lead.id,
+                                    'Lead Number': lead.number,
+                                    'Customer Name': lead.name,
+                                    'Sales Agent': lead.sales_agent,
+                                    'Contact Method': lead.contact,
+                                    'Case Description': lead.case_desc,
+                                    'Feedback': lead.feedback,
+                                    'Status': lead.status,
+                                    'Assigned To': lead.assigned_to,
+                                    'Original Upload Date': lead.uploaded_at.strftime('%Y-%m-%d %H:%M') if lead.uploaded_at else '',
+                                    'Archived By': lead.archived_by,
+                                    'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                                    'Archive Reason': lead.archive_reason,
+                                    'Scheduled Archive Date': lead.archive_date.strftime('%Y-%m-%d %H:%M') if lead.archive_date else '',
+                                    'Days Since Archive': (datetime.utcnow() - lead.archived_at).days if lead.archived_at else 0
+                                })
+                            
+                            df_export = pd.DataFrame(export_data)
+                            
+                            if export_format == 'Excel':
+                                buffer = io.BytesIO()
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    df_export.to_excel(writer, sheet_name='Archived_Leads', index=False)
+                                    
+                                    if export_include_analytics:
+                                        # Analytics summary sheet
+                                        analytics_data = {
+                                            'Metric': [
+                                                'Total Archived Leads',
+                                                'Date Range',
+                                                'Filtered By Reason',
+                                                'Filtered By Agent',
+                                                'Average Days Since Archive',
+                                                'Most Common Archive Reason',
+                                                'Most Active Archiver',
+                                                'Export Generated By',
+                                                'Export Generated On'
+                                            ],
+                                            'Value': [
+                                                len(filtered_leads),
+                                                f"{export_start_date} to {export_end_date}",
+                                                export_filter_reason,
+                                                export_filter_agent,
+                                                f"{df_export['Days Since Archive'].mean():.1f} days",
+                                                df_export['Archive Reason'].mode().iloc[0] if not df_export['Archive Reason'].mode().empty else 'N/A',
+                                                df_export['Archived By'].mode().iloc[0] if not df_export['Archived By'].mode().empty else 'N/A',
+                                                current_user.username,
+                                                datetime.now().strftime('%Y-%m-%d %H:%M')
+                                            ]
+                                        }
+                                        pd.DataFrame(analytics_data).to_excel(writer, sheet_name='Analytics_Summary', index=False)
+                                        
+                                        # Archive reasons breakdown
+                                        reason_counts = df_export['Archive Reason'].value_counts().reset_index()
+                                        reason_counts.columns = ['Archive Reason', 'Count']
+                                        reason_counts.to_excel(writer, sheet_name='Archive_Reasons', index=False)
+                                
+                                filename = f"Archived_Leads_{export_start_date}_{export_end_date}.xlsx"
+                                st.download_button(
+                                    label=f'📥 Download {filename}',
+                                    data=buffer.getvalue(),
+                                    file_name=filename,
+                                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                )
+                            else:
+                                csv_data = df_export.to_csv(index=False)
+                                filename = f"Archived_Leads_{export_start_date}_{export_end_date}.csv"
+                                st.download_button(
+                                    label=f'📥 Download {filename}',
+                                    data=csv_data,
+                                    file_name=filename,
+                                    mime='text/csv'
+                                )
+                            
+                            st.success(f'✅ Export ready! {len(filtered_leads)} leads included.')
+                        else:
+                            st.info('No archived leads found matching the criteria.')
+            
+            with export_tab2:
+                st.write('**Quick Export Options**')
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write('**Export All Archived:**')
+                    if st.button('📊 Export All Archived Leads', key='export_all'):
+                        with get_session() as db:
+                            all_archived = db.query(Lead).filter(Lead.is_archived == 'yes').all()
+                            if all_archived:
+                                export_data = []
+                                for lead in all_archived:
+                                    export_data.append({
+                                        'Lead ID': lead.id,
+                                        'Customer Name': lead.name,
+                                        'Sales Agent': lead.sales_agent,
+                                        'Status': lead.status,
+                                        'Archived By': lead.archived_by,
+                                        'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                                        'Archive Reason': lead.archive_reason
+                                    })
+                                
+                                df_all = pd.DataFrame(export_data)
+                                buffer = io.BytesIO()
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    df_all.to_excel(writer, sheet_name='All_Archived_Leads', index=False)
+                                
+                                filename = f"All_Archived_Leads_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                                st.download_button(
+                                    label=f'📥 Download {filename}',
+                                    data=buffer.getvalue(),
+                                    file_name=filename,
+                                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                )
+                                st.success(f'✅ All {len(all_archived)} archived leads exported!')
+                            else:
+                                st.info('No archived leads found.')
+                    
+                    st.write('**Export Recent Archives:**')
+                    recent_days = st.selectbox('Export archives from last', [7, 14, 30, 60, 90], key='recent_days')
+                    if st.button('📊 Export Recent Archives', key='export_recent'):
+                        with get_session() as db:
+                            cutoff_date = datetime.utcnow() - pd.Timedelta(days=recent_days)
+                            recent_archived = db.query(Lead).filter(
+                                Lead.is_archived == 'yes',
+                                Lead.archived_at >= cutoff_date
+                            ).all()
+                            
+                            if recent_archived:
+                                export_data = []
+                                for lead in recent_archived:
+                                    export_data.append({
+                                        'Lead ID': lead.id,
+                                        'Customer Name': lead.name,
+                                        'Sales Agent': lead.sales_agent,
+                                        'Status': lead.status,
+                                        'Archived By': lead.archived_by,
+                                        'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                                        'Archive Reason': lead.archive_reason
+                                    })
+                                
+                                df_recent = pd.DataFrame(export_data)
+                                buffer = io.BytesIO()
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    df_recent.to_excel(writer, sheet_name=f'Recent_Archives_{recent_days}d', index=False)
+                                
+                                filename = f"Recent_Archives_{recent_days}days_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                                st.download_button(
+                                    label=f'📥 Download {filename}',
+                                    data=buffer.getvalue(),
+                                    file_name=filename,
+                                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                )
+                                st.success(f'✅ {len(recent_archived)} recent archives exported!')
+                            else:
+                                st.info(f'No archives found in the last {recent_days} days.')
+                
+                with col2:
+                    st.write('**Export by Archive Reason:**')
+                    quick_reason = st.selectbox('Select archive reason', 
+                                              options=sorted(archived_leads_df['archive_reason'].dropna().unique().tolist()) if not archived_leads_df.empty else [], key='quick_reason')
+                    if st.button('📊 Export by Reason', key='export_by_reason'):
+                        with get_session() as db:
+                            reason_archived = db.query(Lead).filter(
+                                Lead.is_archived == 'yes',
+                                Lead.archive_reason == quick_reason
+                            ).all()
+                            
+                            if reason_archived:
+                                export_data = []
+                                for lead in reason_archived:
+                                    export_data.append({
+                                        'Lead ID': lead.id,
+                                        'Customer Name': lead.name,
+                                        'Sales Agent': lead.sales_agent,
+                                        'Status': lead.status,
+                                        'Archived By': lead.archived_by,
+                                        'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                                        'Archive Reason': lead.archive_reason
+                                    })
+                                
+                                df_reason = pd.DataFrame(export_data)
+                                buffer = io.BytesIO()
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    df_reason.to_excel(writer, sheet_name=f'Reason_{quick_reason[:20]}', index=False)
+                                
+                                filename = f"Archives_Reason_{quick_reason[:20]}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                                st.download_button(
+                                    label=f'📥 Download {filename}',
+                                    data=buffer.getvalue(),
+                                    file_name=filename,
+                                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                )
+                                st.success(f'✅ {len(reason_archived)} leads exported for reason: {quick_reason}')
+                            else:
+                                st.info(f'No archives found for reason: {quick_reason}')
+            
+            with export_tab3:
+                st.write('**Analytics Export**')
+                st.write('Generate comprehensive analytics reports for archived data.')
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    analytics_start = st.date_input('Analytics start date', value=date.today() - pd.Timedelta(days=90), key='analytics_start')
+                    analytics_end = st.date_input('Analytics end date', value=date.today(), key='analytics_end')
+                with col2:
+                    include_charts = st.checkbox('Include chart data', value=True, key='include_charts')
+                    include_summary = st.checkbox('Include executive summary', value=True, key='include_summary')
+                
+                if st.button('📊 Generate Analytics Report', key='generate_analytics'):
+                    with get_session() as db:
+                        start_datetime = datetime.combine(analytics_start, datetime.min.time())
+                        end_datetime = datetime.combine(analytics_end, datetime.max.time())
+                        
+                        archived_in_period = db.query(Lead).filter(
+                            Lead.is_archived == 'yes',
+                            Lead.archived_at >= start_datetime,
+                            Lead.archived_at <= end_datetime
+                        ).all()
+                        
+                        if archived_in_period:
+                            # Create comprehensive analytics report
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                # Main data
+                                export_data = []
+                                for lead in archived_in_period:
+                                    export_data.append({
+                                        'Lead ID': lead.id,
+                                        'Customer Name': lead.name,
+                                        'Sales Agent': lead.sales_agent,
+                                        'Status': lead.status,
+                                        'Archived By': lead.archived_by,
+                                        'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                                        'Archive Reason': lead.archive_reason
+                                    })
+                                
+                                df_analytics = pd.DataFrame(export_data)
+                                df_analytics.to_excel(writer, sheet_name='Archived_Data', index=False)
+                                
+                                if include_summary:
+                                    # Executive summary
+                                    summary_data = {
+                                        'Metric': [
+                                            'Total Archives in Period',
+                                            'Period Start',
+                                            'Period End',
+                                            'Most Common Archive Reason',
+                                            'Most Active Archiver',
+                                            'Average Archives per Day',
+                                            'Peak Archive Day',
+                                            'Report Generated By',
+                                            'Report Generated On'
+                                        ],
+                                        'Value': [
+                                            len(archived_in_period),
+                                            analytics_start,
+                                            analytics_end,
+                                            df_analytics['Archive Reason'].mode().iloc[0] if not df_analytics['Archive Reason'].mode().empty else 'N/A',
+                                            df_analytics['Archived By'].mode().iloc[0] if not df_analytics['Archived By'].mode().empty else 'N/A',
+                                            f"{len(archived_in_period) / ((end_datetime - start_datetime).days + 1):.1f}",
+                                            df_analytics['Archive Date'].mode().iloc[0] if not df_analytics['Archive Date'].mode().empty else 'N/A',
+                                            current_user.username,
+                                            datetime.now().strftime('%Y-%m-%d %H:%M')
+                                        ]
+                                    }
+                                    pd.DataFrame(summary_data).to_excel(writer, sheet_name='Executive_Summary', index=False)
+                                
+                                if include_charts:
+                                    # Archive reasons breakdown
+                                    reason_counts = df_analytics['Archive Reason'].value_counts().reset_index()
+                                    reason_counts.columns = ['Archive Reason', 'Count']
+                                    reason_counts.to_excel(writer, sheet_name='Archive_Reasons', index=False)
+                                    
+                                    # Archive by agent
+                                    agent_counts = df_analytics['Archived By'].value_counts().reset_index()
+                                    agent_counts.columns = ['Archived By', 'Count']
+                                    agent_counts.to_excel(writer, sheet_name='Archive_by_Agent', index=False)
+                                    
+                                    # Daily archive trends
+                                    df_analytics['Archive Date Only'] = pd.to_datetime(df_analytics['Archive Date']).dt.date
+                                    daily_counts = df_analytics['Archive Date Only'].value_counts().reset_index()
+                                    daily_counts.columns = ['Date', 'Archives']
+                                    daily_counts = daily_counts.sort_values('Date')
+                                    daily_counts.to_excel(writer, sheet_name='Daily_Trends', index=False)
+                            
+                            filename = f"Analytics_Report_{analytics_start}_{analytics_end}.xlsx"
                             st.download_button(
-                                label=f'📥 Download {filename}',
-                                data=excel_data,
+                                label=f'📥 Download Analytics Report',
+                                data=buffer.getvalue(),
                                 file_name=filename,
                                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                             )
+                            st.success(f'✅ Analytics report generated with {len(archived_in_period)} records!')
                         else:
-                            csv_data = export_archived_leads_report(db, (start_datetime, end_datetime), 'csv')
-                            filename = f"Archived_Leads_{export_start_date}_{export_end_date}.csv"
-                            st.download_button(
-                                label=f'📥 Download {filename}',
-                                data=csv_data,
-                                file_name=filename,
-                                mime='text/csv'
-                            )
+                            st.info('No archived data found for the selected period.')
         else:
             st.info('No archived leads found')
     
@@ -2018,14 +2326,14 @@ This package contains comprehensive technical analytics for system management.
             
             col1, col2 = st.columns(2)
             with col1:
-                date_archive_start = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=60))
-                date_archive_end = st.date_input('End Date', value=date.today())
+                date_archive_start = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=60), key='date_archive_start_tab2')
+                date_archive_end = st.date_input('End Date', value=date.today(), key='date_archive_end_tab2')
                 date_archive_agents = st.multiselect('Filter by Agents (optional)',
-                                                   options=sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else [])
+                                                   options=sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else [], key='date_archive_agents_tab2')
             with col2:
                 date_archive_statuses = st.multiselect('Filter by Status (optional)',
                                                      options=['new', 'contacted', 'qualified', 'lost', 'won'],
-                                                     default=['new', 'contacted'])
+                                                     default=['new', 'contacted'], key='date_archive_statuses_tab2')
                 date_archive_reason = st.selectbox('Date Archive Reason', [
                     'Date-based cleanup',
                     'Old leads cleanup',
@@ -2299,8 +2607,8 @@ This package contains comprehensive technical analytics for system management.
         # Date-based archiving
         col1, col2 = st.columns(2)
         with col1:
-            archive_start_date = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=30))
-            archive_end_date = st.date_input('End Date', value=date.today())
+            archive_start_date = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=30), key='archive_start_date_tab4')
+            archive_end_date = st.date_input('End Date', value=date.today(), key='archive_end_date_tab4')
         with col2:
             date_archive_reason = st.selectbox('Date Archive Reason', [
                 'Date-based cleanup',
@@ -2337,7 +2645,7 @@ This package contains comprehensive technical analytics for system management.
         
         # View archived leads by date
         st.write('**View Archived Leads by Date**')
-        view_date = st.date_input('View archived on date', value=date.today())
+        view_date = st.date_input('View archived on date', value=date.today(), key='view_date_tab4')
         
         if st.button('📅 View Archived by Date'):
             with get_session() as db:
