@@ -331,9 +331,15 @@ if st.sidebar.button('Logout'):
 
 # Admin: manage users
 if role == 'admin':
-    st.header('Admin — User Management')
+    st.header('Admin — System Management')
+    
+    # User Management Section
+    st.subheader('👥 User Management')
     db = get_session()
     users = db.query(User).all()
+    
+    # Display current users
+    st.write('**Current Users:**')
     cols = st.columns([1,2,2,1])
     cols[0].write('ID')
     cols[1].write('Username')
@@ -346,41 +352,184 @@ if role == 'admin':
         c2.write(u.name)
         c3.write(u.role)
 
-    st.subheader('Create new user')
-    with st.form('create_user'):
-        new_username = st.text_input('Username')
-        new_name = st.text_input('Full name')
-        new_pass = st.text_input('Password', type='password')
-        new_role = st.selectbox('Role', ['salesman','head_of_sales','cto','ceo','admin'])
-        create = st.form_submit_button('Create')
-        if create:
-            if new_username and new_pass:
-                res = create_user(db, new_username, new_pass, role=new_role, name=new_name)
-                if res:
-                    st.success('User created')
-                else:
-                    st.error('Username already exists')
-            else:
-                st.error('Fill username and password')
-    db.close()
+    # Create new user form
     st.markdown('---')
-    st.subheader('Maintenance')
-    if st.button('Reset database (drop & recreate)'):
-        try:
-            # Close sessions and remove DB file
+    st.subheader('➕ Create New User')
+    with st.form('create_user'):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_username = st.text_input('Username', placeholder='e.g., john_doe')
+            new_name = st.text_input('Full Name', placeholder='e.g., John Doe')
+            new_role = st.selectbox('Role', ['salesman','head_of_sales','cto','ceo','admin'])
+        with col2:
+            new_pass = st.text_input('Password', type='password', placeholder='Enter password')
+            confirm_pass = st.text_input('Confirm Password', type='password', placeholder='Confirm password')
+            st.write('**Password Format:** IQstats@iq-XXXX (recommended)')
+        
+        create = st.form_submit_button('✅ Create User')
+        if create:
+            if new_username and new_pass and new_name:
+                if new_pass == confirm_pass:
+                    res = create_user(db, new_username, new_pass, role=new_role, name=new_name)
+                    if res:
+                        st.success(f'✅ User "{new_username}" created successfully!')
+                        st.rerun()
+                    else:
+                        st.error('❌ Username already exists')
+                else:
+                    st.error('❌ Passwords do not match')
+            else:
+                st.error('❌ Please fill all required fields')
+    
+    # User Actions
+    st.markdown('---')
+    st.subheader('🔧 User Actions')
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write('**Delete User:**')
+        if users:
+            user_to_delete = st.selectbox('Select user to delete', 
+                                        options=[f"{u.username} ({u.name})" for u in users if u.username != 'admin'],
+                                        key='delete_user')
+            if st.button('🗑️ Delete User', type='secondary'):
+                if user_to_delete:
+                    username = user_to_delete.split(' (')[0]
+                    user = db.query(User).filter(User.username == username).first()
+                    if user:
+                        db.delete(user)
+                        db.commit()
+                        st.success(f'✅ User "{username}" deleted successfully!')
+                        st.rerun()
+    
+    with col2:
+        st.write('**Update User Password:**')
+        if users:
+            user_to_update = st.selectbox('Select user to update', 
+                                        options=[f"{u.username} ({u.name})" for u in users],
+                                        key='update_user')
+            new_password = st.text_input('New Password', type='password', key='new_pwd')
+            if st.button('🔐 Update Password', type='secondary'):
+                if user_to_update and new_password:
+                    username = user_to_update.split(' (')[0]
+                    user = db.query(User).filter(User.username == username).first()
+                    if user:
+                        user.password_hash = User.hash_password(new_password)
+                        db.commit()
+                        st.success(f'✅ Password updated for "{username}"!')
+                        st.rerun()
+    
+    db.close()
+    
+    # System Maintenance Section
+    st.markdown('---')
+    st.subheader('⚙️ System Maintenance')
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write('**Database Management:**')
+        if st.button('🔄 Reset Database (Drop & Recreate)', type='primary'):
             try:
-                del st.session_state['user']
-            except Exception:
-                pass
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
-            # Recreate
-            Base.metadata.create_all(bind=engine)
-            ensure_schema()
-            ensure_demo_users()
-            st.success('Database reset. Please reload the app.')
-        except Exception as e:
-            st.error(f'Failed to reset database: {e}')
+                # Close sessions and remove DB file
+                try:
+                    del st.session_state['user']
+                except Exception:
+                    pass
+                if os.path.exists(DB_FILE):
+                    os.remove(DB_FILE)
+                # Recreate
+                Base.metadata.create_all(bind=engine)
+                ensure_schema()
+                ensure_demo_users()
+                st.success('✅ Database reset successfully! Please reload the app.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Failed to reset database: {e}')
+        
+        if st.button('📊 Export All Data', type='secondary'):
+            try:
+                from datetime import datetime
+                import zipfile
+                
+                now = datetime.now()
+                date_str = now.strftime('%Y-%m-%d_%H-%M')
+                zip_filename = f"Admin_Data_Export_{date_str}.zip"
+                
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Export users
+                    users_df = pd.DataFrame([{
+                        'id': u.id, 'username': u.username, 'name': u.name, 
+                        'role': u.role, 'created_at': u.created_at
+                    } for u in users])
+                    users_buffer = io.BytesIO()
+                    with pd.ExcelWriter(users_buffer, engine='openpyxl') as writer:
+                        users_df.to_excel(writer, sheet_name='Users', index=False)
+                    zip_file.writestr('Users.xlsx', users_buffer.getvalue())
+                    
+                    # Export leads
+                    leads_df, _ = read_leads_df(limit=100000)
+                    if not leads_df.empty:
+                        leads_buffer = io.BytesIO()
+                        with pd.ExcelWriter(leads_buffer, engine='openpyxl') as writer:
+                            leads_df.to_excel(writer, sheet_name='Leads', index=False)
+                        zip_file.writestr('Leads.xlsx', leads_buffer.getvalue())
+                    
+                    # Export deals
+                    deals_df, _ = read_deals_df(limit=100000)
+                    if not deals_df.empty:
+                        deals_buffer = io.BytesIO()
+                        with pd.ExcelWriter(deals_buffer, engine='openpyxl') as writer:
+                            deals_df.to_excel(writer, sheet_name='Deals', index=False)
+                        zip_file.writestr('Deals.xlsx', deals_buffer.getvalue())
+                    
+                    # README
+                    readme_content = f"""Admin Data Export
+Generated on: {now.strftime('%A, %B %d, %Y at %H:%M')}
+Generated by: Admin
+
+Contents:
+- Users.xlsx: All user accounts and roles
+- Leads.xlsx: All leads data
+- Deals.xlsx: All deals data
+
+This is a complete system backup for administrative purposes.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                st.download_button(
+                    label=f'📥 Download {zip_filename}',
+                    data=zip_buffer.getvalue(),
+                    file_name=zip_filename,
+                    mime='application/zip'
+                )
+                st.success('✅ Data export ready!')
+                
+            except Exception as e:
+                st.error(f'❌ Error creating data export: {str(e)}')
+    
+    with col2:
+        st.write('**System Information:**')
+        st.info(f"""
+        **Database File:** {DB_FILE}
+        **Total Users:** {len(users)}
+        **Database Size:** {os.path.getsize(DB_FILE) / 1024:.1f} KB
+        **Last Modified:** {datetime.fromtimestamp(os.path.getmtime(DB_FILE)).strftime('%Y-%m-%d %H:%M')}
+        """)
+        
+        st.write('**Quick Actions:**')
+        if st.button('🔄 Refresh Page', type='secondary'):
+            st.rerun()
+        
+        if st.button('📋 Copy System Info', type='secondary'):
+            st.code(f"""
+Database: {DB_FILE}
+Users: {len(users)}
+Size: {os.path.getsize(DB_FILE) / 1024:.1f} KB
+Modified: {datetime.fromtimestamp(os.path.getmtime(DB_FILE)).strftime('%Y-%m-%d %H:%M')}
+            """)
+    
     st.stop()
 
 # Common functions for leads
@@ -1194,6 +1343,140 @@ elif role == 'cto':
         with pd.ExcelWriter(xls_buf, engine='openpyxl') as writer:
             df_f.to_excel(writer, index=False, sheet_name='leads_filtered')
         st.download_button('Download Excel (filtered)', data=xls_buf.getvalue(), file_name='leads_filtered.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        # CTO Analytics Package Download
+        st.markdown('---')
+        st.subheader('📦 Download Complete Analytics Package')
+        
+        from datetime import datetime
+        import zipfile
+        
+        # Generate filename with current day and date
+        now = datetime.now()
+        day_name = now.strftime('%A')  # Full day name (e.g., 'Monday')
+        date_str = now.strftime('%Y-%m-%d')  # Date format (e.g., '2024-08-09')
+        zip_filename = f"CTO_Analytics_{day_name}_{date_str}.zip"
+        
+        if st.button('📊 Generate & Download CTO Analytics Package'):
+            try:
+                # Create ZIP file in memory
+                zip_buffer = io.BytesIO()
+                
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Add all chart data as Excel sheets
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        # Main filtered data
+                        df_f.to_excel(writer, sheet_name='Filtered_Leads', index=False)
+                        
+                        # Chart data from all the charts above
+                        charts_data = {}
+                        
+                        # Daily leads
+                        if not daily.empty:
+                            daily.to_excel(writer, sheet_name='Daily_Leads', index=False)
+                            charts_data['daily_leads'] = daily
+                        
+                        # Agent breakdown
+                        if not agent_counts.empty:
+                            agent_counts.to_excel(writer, sheet_name='Agent_Breakdown', index=False)
+                            charts_data['agent_breakdown'] = agent_counts
+                        
+                        # Status breakdown
+                        if not status_counts.empty:
+                            status_counts.to_excel(writer, sheet_name='Status_Breakdown', index=False)
+                            charts_data['status_breakdown'] = status_counts
+                        
+                        # Sales funnel
+                        if 'funnel_df' in locals():
+                            funnel_df.to_excel(writer, sheet_name='Sales_Funnel', index=False)
+                            charts_data['sales_funnel'] = funnel_df
+                        
+                        # Contact methods
+                        if 'cm_counts' in locals() and not cm_counts.empty:
+                            cm_counts.to_excel(writer, sheet_name='Contact_Methods', index=False)
+                            charts_data['contact_methods'] = cm_counts
+                        
+                        # Activity heatmap
+                        if 'heat' in locals() and not heat.empty:
+                            heat.to_excel(writer, sheet_name='Activity_Heatmap', index=False)
+                            charts_data['activity_heatmap'] = heat
+                        
+                        # Trends analysis
+                        if 'daily_ra' in locals():
+                            daily_ra.to_excel(writer, sheet_name='Trends_Analysis', index=False)
+                            charts_data['trends'] = daily_ra
+                        
+                        # CTO Summary statistics
+                        summary_data = {
+                            'Metric': ['Total Leads', 'Filtered Leads', 'Active Agents', 'Date Range', 'Generated By'],
+                            'Value': [
+                                len(df_all),
+                                len(df_f),
+                                len(agent_counts) if 'agent_breakdown' in charts_data else 0,
+                                f"{date_range[0] if isinstance(date_range, (list, tuple)) else 'All'} to {date_range[1] if isinstance(date_range, (list, tuple)) else 'All'}",
+                                'CTO Dashboard'
+                            ]
+                        }
+                        pd.DataFrame(summary_data).to_excel(writer, sheet_name='CTO_Summary', index=False)
+                    
+                    # Add Excel file to ZIP
+                    zip_file.writestr(f'CTO_Analytics_{date_str}.xlsx', excel_buffer.getvalue())
+                    
+                    # Add deals data if available
+                    deals_df, _ = read_deals_df(limit=100000)
+                    if not deals_df.empty:
+                        deals_buffer = io.BytesIO()
+                        with pd.ExcelWriter(deals_buffer, engine='openpyxl') as deals_writer:
+                            deals_df.to_excel(deals_writer, sheet_name='All_Deals', index=False)
+                            
+                            # Deals summary
+                            deals_summary = deals_df.groupby('uploaded_by').size().reset_index(name='deals_count')
+                            deals_summary.to_excel(deals_writer, sheet_name='Deals_by_Agent', index=False)
+                        
+                        zip_file.writestr(f'CTO_Deals_Report_{date_str}.xlsx', deals_buffer.getvalue())
+                    
+                    # Add a README file
+                    readme_content = f"""CTO Analytics Package
+Generated on: {now.strftime('%A, %B %d, %Y at %H:%M')}
+Generated for: CTO Dashboard
+
+Contents:
+- CTO_Analytics_{date_str}.xlsx: Complete analytics with all charts data
+- CTO_Deals_Report_{date_str}.xlsx: Deals tracking and performance data
+
+Chart Data Included:
+- Daily leads trends
+- Agent performance breakdown
+- Lead status distribution
+- Sales funnel analysis
+- Contact method analysis
+- Activity heatmaps
+- Rolling averages and trends
+- Filtered data based on current selections
+
+CTO Summary:
+- Total Leads: {len(df_all)}
+- Filtered Leads: {len(df_f)}
+- Active Agents: {len(agent_counts) if 'agent_breakdown' in charts_data else 0}
+
+This package contains comprehensive technical analytics for system management.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                # Offer download
+                st.download_button(
+                    label=f'📥 Download {zip_filename}',
+                    data=zip_buffer.getvalue(),
+                    file_name=zip_filename,
+                    mime='application/zip',
+                    help=f'Download complete CTO analytics package for {day_name}, {date_str}'
+                )
+                
+                st.success(f'✅ CTO Analytics package ready! Contains all dashboard charts and technical reports for {day_name}, {date_str}')
+                
+            except Exception as e:
+                st.error(f'Error creating CTO analytics package: {str(e)}')
 
         # Done deals charts (handles empty safely)
         st.markdown('---')

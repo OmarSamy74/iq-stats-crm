@@ -97,6 +97,13 @@ class Lead(Base):
     uploaded_by_id = Column(Integer, ForeignKey('users.id'))  # FK
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
+    # Archiving fields for CTO
+    is_archived = Column(String, default='no')  # yes, no
+    archived_by = Column(String, nullable=True)  # username who archived
+    archived_at = Column(DateTime, nullable=True)
+    archive_reason = Column(Text, nullable=True)  # reason for archiving
+    archive_date = Column(DateTime, nullable=True)  # date when lead should be archived
+
     # relationships
     uploader = relationship('User', back_populates='uploads')
     activities = relationship('Activity', back_populates='lead', cascade="all, delete-orphan")
@@ -170,6 +177,18 @@ def ensure_schema():
             conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN assigned_to VARCHAR")
         if 'status' not in existing_columns:
             conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN status VARCHAR DEFAULT 'new'")
+        
+        # Add archiving columns if they don't exist
+        if 'is_archived' not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN is_archived VARCHAR DEFAULT 'no'")
+        if 'archived_by' not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN archived_by VARCHAR")
+        if 'archived_at' not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN archived_at DATETIME")
+        if 'archive_reason' not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN archive_reason TEXT")
+        if 'archive_date' not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE leads ADD COLUMN archive_date DATETIME")
 
         # Optional: ensure indexes exist (SQLite auto-creates pk index; skip others for simplicity)
 
@@ -274,6 +293,119 @@ def log_activity(db, lead_id, actor, action, detail=None):
     db.add(act)
     db.commit()
 
+# ----------------- Archiving helpers -----------------
+
+def archive_lead(db, lead_id, archived_by, reason=None, archive_date=None):
+    """Archive a lead by CTO"""
+    lead = db.query(Lead).get(lead_id)
+    if lead:
+        lead.is_archived = 'yes'
+        lead.archived_by = archived_by
+        lead.archived_at = datetime.utcnow()
+        lead.archive_reason = reason
+        lead.archive_date = archive_date
+        db.add(lead)
+        db.commit()
+        log_activity(db, lead_id, archived_by, 'archive', detail=f'Archived: {reason}')
+        return True
+    return False
+
+def unarchive_lead(db, lead_id, unarchived_by):
+    """Unarchive a lead by CTO"""
+    lead = db.query(Lead).get(lead_id)
+    if lead:
+        lead.is_archived = 'no'
+        lead.archived_by = None
+        lead.archived_at = None
+        lead.archive_reason = None
+        lead.archive_date = None
+        db.add(lead)
+        db.commit()
+        log_activity(db, lead_id, unarchived_by, 'unarchive', detail='Lead unarchived')
+        return True
+    return False
+
+def bulk_archive_leads(db, lead_ids, archived_by, reason=None, archive_date=None):
+    """Bulk archive multiple leads"""
+    archived_count = 0
+    for lead_id in lead_ids:
+        if archive_lead(db, lead_id, archived_by, reason, archive_date):
+            archived_count += 1
+    return archived_count
+
+def get_archived_leads_by_date(db, date_filter=None):
+    """Get archived leads filtered by date"""
+    q = db.query(Lead).filter(Lead.is_archived == 'yes')
+    if date_filter:
+        if isinstance(date_filter, str):
+            # Filter by specific date
+            q = q.filter(func.date(Lead.archived_at) == date_filter)
+        elif isinstance(date_filter, (list, tuple)) and len(date_filter) == 2:
+            # Filter by date range
+            start_date, end_date = date_filter
+            q = q.filter(
+                Lead.archived_at >= start_date,
+                Lead.archived_at <= end_date
+            )
+    return q.order_by(Lead.archived_at.desc()).all()
+
+def export_archived_leads_report(db, date_range=None, format='excel'):
+    """Export archived leads report with date information"""
+    q = db.query(Lead).filter(Lead.is_archived == 'yes')
+    
+    if date_range:
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            start_date, end_date = date_range
+            q = q.filter(
+                Lead.archived_at >= start_date,
+                Lead.archived_at <= end_date
+            )
+    
+    archived_leads = q.order_by(Lead.archived_at.desc()).all()
+    
+    # Create DataFrame with all relevant information
+    data = []
+    for lead in archived_leads:
+        data.append({
+            'Lead ID': lead.id,
+            'Lead Number': lead.number,
+            'Customer Name': lead.name,
+            'Sales Agent': lead.sales_agent,
+            'Contact Method': lead.contact,
+            'Case Description': lead.case_desc,
+            'Feedback': lead.feedback,
+            'Status': lead.status,
+            'Assigned To': lead.assigned_to,
+            'Original Upload Date': lead.uploaded_at.strftime('%Y-%m-%d %H:%M') if lead.uploaded_at else '',
+            'Archived By': lead.archived_by,
+            'Archive Date': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+            'Archive Reason': lead.archive_reason,
+            'Scheduled Archive Date': lead.archive_date.strftime('%Y-%m-%d %H:%M') if lead.archive_date else ''
+        })
+    
+    df = pd.DataFrame(data)
+    
+    if format == 'excel':
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Archived_Leads', index=False)
+            
+            # Add summary sheet
+            summary_data = {
+                'Metric': ['Total Archived Leads', 'Date Range', 'Generated By', 'Generated On'],
+                'Value': [
+                    len(archived_leads),
+                    f"{date_range[0] if date_range else 'All'} to {date_range[1] if date_range else 'All'}",
+                    'CTO Dashboard',
+                    datetime.now().strftime('%Y-%m-%d %H:%M')
+                ]
+            }
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
+        
+        return buffer.getvalue()
+    else:
+        return df.to_csv(index=False)
+
 # ----------------- Streamlit UI -----------------
 
 st.set_page_config(page_title='IQ Stats CRM — Full', layout='wide')
@@ -331,9 +463,15 @@ if st.sidebar.button('Logout'):
 
 # Admin: manage users
 if role == 'admin':
-    st.header('Admin — User Management')
+    st.header('Admin — System Management')
+    
+    # User Management Section
+    st.subheader('👥 User Management')
     db = get_session()
     users = db.query(User).all()
+    
+    # Display current users
+    st.write('**Current Users:**')
     cols = st.columns([1,2,2,1])
     cols[0].write('ID')
     cols[1].write('Username')
@@ -346,57 +484,211 @@ if role == 'admin':
         c2.write(u.name)
         c3.write(u.role)
 
-    st.subheader('Create new user')
-    with st.form('create_user'):
-        new_username = st.text_input('Username')
-        new_name = st.text_input('Full name')
-        new_pass = st.text_input('Password', type='password')
-        new_role = st.selectbox('Role', ['salesman','head_of_sales','cto','ceo','admin'])
-        create = st.form_submit_button('Create')
-        if create:
-            if new_username and new_pass:
-                res = create_user(db, new_username, new_pass, role=new_role, name=new_name)
-                if res:
-                    st.success('User created')
-                else:
-                    st.error('Username already exists')
-            else:
-                st.error('Fill username and password')
-    db.close()
+    # Create new user form
     st.markdown('---')
-    st.subheader('Maintenance')
-    if st.button('Reset database (drop & recreate)'):
-        try:
-            # Close sessions and remove DB file
+    st.subheader('➕ Create New User')
+    with st.form('create_user'):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_username = st.text_input('Username', placeholder='e.g., john_doe')
+            new_name = st.text_input('Full Name', placeholder='e.g., John Doe')
+            new_role = st.selectbox('Role', ['salesman','head_of_sales','cto','ceo','admin'])
+        with col2:
+            new_pass = st.text_input('Password', type='password', placeholder='Enter password')
+            confirm_pass = st.text_input('Confirm Password', type='password', placeholder='Confirm password')
+            st.write('**Password Format:** IQstats@iq-XXXX (recommended)')
+        
+        create = st.form_submit_button('✅ Create User')
+        if create:
+            if new_username and new_pass and new_name:
+                if new_pass == confirm_pass:
+                    res = create_user(db, new_username, new_pass, role=new_role, name=new_name)
+                    if res:
+                        st.success(f'✅ User "{new_username}" created successfully!')
+                        st.rerun()
+                    else:
+                        st.error('❌ Username already exists')
+                else:
+                    st.error('❌ Passwords do not match')
+            else:
+                st.error('❌ Please fill all required fields')
+    
+    # User Actions
+    st.markdown('---')
+    st.subheader('🔧 User Actions')
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write('**Delete User:**')
+        if users:
+            user_to_delete = st.selectbox('Select user to delete', 
+                                        options=[f"{u.username} ({u.name})" for u in users if u.username != 'admin'],
+                                        key='delete_user')
+            if st.button('🗑️ Delete User', type='secondary'):
+                if user_to_delete:
+                    username = user_to_delete.split(' (')[0]
+                    user = db.query(User).filter(User.username == username).first()
+                    if user:
+                        db.delete(user)
+                        db.commit()
+                        st.success(f'✅ User "{username}" deleted successfully!')
+                        st.rerun()
+    
+    with col2:
+        st.write('**Update User Password:**')
+        if users:
+            user_to_update = st.selectbox('Select user to update', 
+                                        options=[f"{u.username} ({u.name})" for u in users],
+                                        key='update_user')
+            new_password = st.text_input('New Password', type='password', key='new_pwd')
+            if st.button('🔐 Update Password', type='secondary'):
+                if user_to_update and new_password:
+                    username = user_to_update.split(' (')[0]
+                    user = db.query(User).filter(User.username == username).first()
+                    if user:
+                        user.password_hash = User.hash_password(new_password)
+                        db.commit()
+                        st.success(f'✅ Password updated for "{username}"!')
+                        st.rerun()
+    
+    db.close()
+    
+    # System Maintenance Section
+    st.markdown('---')
+    st.subheader('⚙️ System Maintenance')
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write('**Database Management:**')
+        if st.button('🔄 Reset Database (Drop & Recreate)', type='primary'):
             try:
-                del st.session_state['user']
-            except Exception:
-                pass
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
-            # Recreate
-            Base.metadata.create_all(bind=engine)
-            ensure_schema()
-            ensure_demo_users()
-            st.success('Database reset. Please reload the app.')
-        except Exception as e:
-            st.error(f'Failed to reset database: {e}')
+                # Close sessions and remove DB file
+                try:
+                    del st.session_state['user']
+                except Exception:
+                    pass
+                if os.path.exists(DB_FILE):
+                    os.remove(DB_FILE)
+                # Recreate
+                Base.metadata.create_all(bind=engine)
+                ensure_schema()
+                ensure_demo_users()
+                st.success('✅ Database reset successfully! Please reload the app.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Failed to reset database: {e}')
+        
+        if st.button('📊 Export All Data', type='secondary'):
+            try:
+                from datetime import datetime
+                import zipfile
+                
+                now = datetime.now()
+                date_str = now.strftime('%Y-%m-%d_%H-%M')
+                zip_filename = f"Admin_Data_Export_{date_str}.zip"
+                
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Export users
+                    users_df = pd.DataFrame([{
+                        'id': u.id, 'username': u.username, 'name': u.name, 
+                        'role': u.role, 'created_at': u.created_at
+                    } for u in users])
+                    users_buffer = io.BytesIO()
+                    with pd.ExcelWriter(users_buffer, engine='openpyxl') as writer:
+                        users_df.to_excel(writer, sheet_name='Users', index=False)
+                    zip_file.writestr('Users.xlsx', users_buffer.getvalue())
+                    
+                    # Export leads
+                    leads_df, _ = read_leads_df(limit=100000)
+                    if not leads_df.empty:
+                        leads_buffer = io.BytesIO()
+                        with pd.ExcelWriter(leads_buffer, engine='openpyxl') as writer:
+                            leads_df.to_excel(writer, sheet_name='Leads', index=False)
+                        zip_file.writestr('Leads.xlsx', leads_buffer.getvalue())
+                    
+                    # Export deals
+                    deals_df, _ = read_deals_df(limit=100000)
+                    if not deals_df.empty:
+                        deals_buffer = io.BytesIO()
+                        with pd.ExcelWriter(deals_buffer, engine='openpyxl') as writer:
+                            deals_df.to_excel(writer, sheet_name='Deals', index=False)
+                        zip_file.writestr('Deals.xlsx', deals_buffer.getvalue())
+                    
+                    # README
+                    readme_content = f"""Admin Data Export
+Generated on: {now.strftime('%A, %B %d, %Y at %H:%M')}
+Generated by: Admin
+
+Contents:
+- Users.xlsx: All user accounts and roles
+- Leads.xlsx: All leads data
+- Deals.xlsx: All deals data
+
+This is a complete system backup for administrative purposes.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                st.download_button(
+                    label=f'📥 Download {zip_filename}',
+                    data=zip_buffer.getvalue(),
+                    file_name=zip_filename,
+                    mime='application/zip'
+                )
+                st.success('✅ Data export ready!')
+                
+            except Exception as e:
+                st.error(f'❌ Error creating data export: {str(e)}')
+    
+    with col2:
+        st.write('**System Information:**')
+        st.info(f"""
+        **Database File:** {DB_FILE}
+        **Total Users:** {len(users)}
+        **Database Size:** {os.path.getsize(DB_FILE) / 1024:.1f} KB
+        **Last Modified:** {datetime.fromtimestamp(os.path.getmtime(DB_FILE)).strftime('%Y-%m-%d %H:%M')}
+        """)
+        
+        st.write('**Quick Actions:**')
+        if st.button('🔄 Refresh Page', type='secondary'):
+            st.rerun()
+        
+        if st.button('📋 Copy System Info', type='secondary'):
+            st.code(f"""
+Database: {DB_FILE}
+Users: {len(users)}
+Size: {os.path.getsize(DB_FILE) / 1024:.1f} KB
+Modified: {datetime.fromtimestamp(os.path.getmtime(DB_FILE)).strftime('%Y-%m-%d %H:%M')}
+            """)
+    
     st.stop()
 
 # Common functions for leads
 
-def read_leads_df(filters=None, search=None, order_by='uploaded_at', desc=True, limit=100, offset=0):
+def read_leads_df(filters=None, search=None, order_by='uploaded_at', desc=True, limit=100, offset=0, include_archived=False):
     db = get_session()
     q = db.query(Lead)
+    
+    # Default filter: exclude archived leads unless specifically requested
+    if not include_archived:
+        q = q.filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'))
+    
     if filters:
         for k, v in filters.items():
             if k == 'sales_agent' and v != 'All':
                 q = q.filter(Lead.sales_agent == v)
             if k == 'status' and v != 'All':
                 q = q.filter(Lead.status == v)
+            if k == 'is_archived' and v != 'All':
+                q = q.filter(Lead.is_archived == v)
+            if k == 'archived_by' and v != 'All':
+                q = q.filter(Lead.archived_by == v)
+    
     if search:
         like = f"%{search}%"
         q = q.filter(sa.or_(Lead.name.ilike(like), Lead.number.ilike(like), Lead.contact.ilike(like)))
+    
     total = q.count()
     if order_by:
         col = getattr(Lead, order_by)
@@ -888,6 +1180,49 @@ elif role == 'cto':
                     st.success(f'Saved {saved} leads')
                     st.rerun()
 
+    # --- CTO Add New Leads Manually ---
+    with st.expander('Add New Leads Manually (CTO)'):
+        st.write('**Add individual leads manually**')
+        
+        with st.form('cto_add_lead_form'):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_lead_number = st.text_input('Lead Number', placeholder='Enter lead number')
+                new_lead_name = st.text_input('Lead Name', placeholder='Enter customer name')
+                new_lead_contact = st.text_input('Contact Method', placeholder='e.g., call, whatsapp')
+                new_lead_case = st.text_area('Case Description', placeholder='Describe the case or inquiry')
+            with col2:
+                new_lead_agent = st.selectbox('Sales Agent', 
+                                            options=[''] + [u.username for u in get_session().query(User).filter(User.role=='salesman').order_by(User.username.asc()).all()])
+                new_lead_status = st.selectbox('Status', options=['new', 'contacted', 'qualified', 'lost', 'won'])
+                new_lead_feedback = st.text_area('Feedback', placeholder='Any feedback or notes')
+                new_lead_assigned = st.selectbox('Assigned To', 
+                                               options=[''] + [u.username for u in get_session().query(User).filter(User.role=='salesman').order_by(User.username.asc()).all()])
+            
+            if st.form_submit_button('➕ Add New Lead'):
+                if new_lead_name and new_lead_agent:
+                    with get_session() as db:
+                        new_lead = Lead(
+                            number=new_lead_number if new_lead_number else None,
+                            name=new_lead_name,
+                            sales_agent=new_lead_agent,
+                            contact=new_lead_contact if new_lead_contact else None,
+                            case_desc=new_lead_case if new_lead_case else None,
+                            feedback=new_lead_feedback if new_lead_feedback else None,
+                            status=new_lead_status,
+                            assigned_to=new_lead_assigned if new_lead_assigned else new_lead_agent,
+                            uploaded_by=current_user.username,
+                            uploaded_by_id=current_user.id,
+                            uploaded_at=datetime.utcnow()
+                        )
+                        db.add(new_lead)
+                        db.commit()
+                        log_activity(db, new_lead.id, current_user.username, 'create', detail='CTO manual lead creation')
+                        st.success(f'✅ Lead "{new_lead_name}" added successfully!')
+                        st.rerun()
+                else:
+                    st.error('❌ Please provide at least Lead Name and Sales Agent')
+
     df_all, total = read_leads_df(limit=10000, offset=0)
     if df_all.empty:
         st.info('No data yet. Upload leads (Sales tab) or generate demo leads below.')
@@ -1195,6 +1530,140 @@ elif role == 'cto':
             df_f.to_excel(writer, index=False, sheet_name='leads_filtered')
         st.download_button('Download Excel (filtered)', data=xls_buf.getvalue(), file_name='leads_filtered.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
+        # CTO Analytics Package Download
+        st.markdown('---')
+        st.subheader('📦 Download Complete Analytics Package')
+        
+        from datetime import datetime
+        import zipfile
+        
+        # Generate filename with current day and date
+        now = datetime.now()
+        day_name = now.strftime('%A')  # Full day name (e.g., 'Monday')
+        date_str = now.strftime('%Y-%m-%d')  # Date format (e.g., '2024-08-09')
+        zip_filename = f"CTO_Analytics_{day_name}_{date_str}.zip"
+        
+        if st.button('📊 Generate & Download CTO Analytics Package'):
+            try:
+                # Create ZIP file in memory
+                zip_buffer = io.BytesIO()
+                
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Add all chart data as Excel sheets
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        # Main filtered data
+                        df_f.to_excel(writer, sheet_name='Filtered_Leads', index=False)
+                        
+                        # Chart data from all the charts above
+                        charts_data = {}
+                        
+                        # Daily leads
+                        if not daily.empty:
+                            daily.to_excel(writer, sheet_name='Daily_Leads', index=False)
+                            charts_data['daily_leads'] = daily
+                        
+                        # Agent breakdown
+                        if not agent_counts.empty:
+                            agent_counts.to_excel(writer, sheet_name='Agent_Breakdown', index=False)
+                            charts_data['agent_breakdown'] = agent_counts
+                        
+                        # Status breakdown
+                        if not status_counts.empty:
+                            status_counts.to_excel(writer, sheet_name='Status_Breakdown', index=False)
+                            charts_data['status_breakdown'] = status_counts
+                        
+                        # Sales funnel
+                        if 'funnel_df' in locals():
+                            funnel_df.to_excel(writer, sheet_name='Sales_Funnel', index=False)
+                            charts_data['sales_funnel'] = funnel_df
+                        
+                        # Contact methods
+                        if 'cm_counts' in locals() and not cm_counts.empty:
+                            cm_counts.to_excel(writer, sheet_name='Contact_Methods', index=False)
+                            charts_data['contact_methods'] = cm_counts
+                        
+                        # Activity heatmap
+                        if 'heat' in locals() and not heat.empty:
+                            heat.to_excel(writer, sheet_name='Activity_Heatmap', index=False)
+                            charts_data['activity_heatmap'] = heat
+                        
+                        # Trends analysis
+                        if 'daily_ra' in locals():
+                            daily_ra.to_excel(writer, sheet_name='Trends_Analysis', index=False)
+                            charts_data['trends'] = daily_ra
+                        
+                        # CTO Summary statistics
+                        summary_data = {
+                            'Metric': ['Total Leads', 'Filtered Leads', 'Active Agents', 'Date Range', 'Generated By'],
+                            'Value': [
+                                len(df_all),
+                                len(df_f),
+                                len(agent_counts) if 'agent_breakdown' in charts_data else 0,
+                                f"{date_range[0] if isinstance(date_range, (list, tuple)) else 'All'} to {date_range[1] if isinstance(date_range, (list, tuple)) else 'All'}",
+                                'CTO Dashboard'
+                            ]
+                        }
+                        pd.DataFrame(summary_data).to_excel(writer, sheet_name='CTO_Summary', index=False)
+                    
+                    # Add Excel file to ZIP
+                    zip_file.writestr(f'CTO_Analytics_{date_str}.xlsx', excel_buffer.getvalue())
+                    
+                    # Add deals data if available
+                    deals_df, _ = read_deals_df(limit=100000)
+                    if not deals_df.empty:
+                        deals_buffer = io.BytesIO()
+                        with pd.ExcelWriter(deals_buffer, engine='openpyxl') as deals_writer:
+                            deals_df.to_excel(deals_writer, sheet_name='All_Deals', index=False)
+                            
+                            # Deals summary
+                            deals_summary = deals_df.groupby('uploaded_by').size().reset_index(name='deals_count')
+                            deals_summary.to_excel(deals_writer, sheet_name='Deals_by_Agent', index=False)
+                        
+                        zip_file.writestr(f'CTO_Deals_Report_{date_str}.xlsx', deals_buffer.getvalue())
+                    
+                    # Add a README file
+                    readme_content = f"""CTO Analytics Package
+Generated on: {now.strftime('%A, %B %d, %Y at %H:%M')}
+Generated for: CTO Dashboard
+
+Contents:
+- CTO_Analytics_{date_str}.xlsx: Complete analytics with all charts data
+- CTO_Deals_Report_{date_str}.xlsx: Deals tracking and performance data
+
+Chart Data Included:
+- Daily leads trends
+- Agent performance breakdown
+- Lead status distribution
+- Sales funnel analysis
+- Contact method analysis
+- Activity heatmaps
+- Rolling averages and trends
+- Filtered data based on current selections
+
+CTO Summary:
+- Total Leads: {len(df_all)}
+- Filtered Leads: {len(df_f)}
+- Active Agents: {len(agent_counts) if 'agent_breakdown' in charts_data else 0}
+
+This package contains comprehensive technical analytics for system management.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                # Offer download
+                st.download_button(
+                    label=f'📥 Download {zip_filename}',
+                    data=zip_buffer.getvalue(),
+                    file_name=zip_filename,
+                    mime='application/zip',
+                    help=f'Download complete CTO analytics package for {day_name}, {date_str}'
+                )
+                
+                st.success(f'✅ CTO Analytics package ready! Contains all dashboard charts and technical reports for {day_name}, {date_str}')
+                
+            except Exception as e:
+                st.error(f'Error creating CTO analytics package: {str(e)}')
+
         # Done deals charts (handles empty safely)
         st.markdown('---')
         st.subheader('Done Deals — Analytics')
@@ -1214,6 +1683,356 @@ elif role == 'cto':
                 if not dd_sales.empty:
                     dd_fig2 = px.bar(dd_sales, x='salesman', y='deals', title='Deals by salesman')
                     st.plotly_chart(dd_fig2, use_container_width=True)
+
+    # CTO Lead Archiving Section
+    st.markdown('---')
+    st.subheader('📦 CTO Lead Archiving Management')
+    
+    # Create tabs for different archiving functions
+    archive_tab1, archive_tab2, archive_tab3, archive_tab4 = st.tabs(['Archive Leads', 'View Archived', 'Bulk Archive', 'Archive by Date'])
+    
+    with archive_tab1:
+        st.write('**Archive Individual Leads**')
+        
+        # Get active leads for archiving
+        active_leads_df, active_total = read_leads_df(limit=1000, offset=0, include_archived=False)
+        
+        if not active_leads_df.empty:
+            # Filter options
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                agent_filter = st.selectbox('Filter by Sales Agent', 
+                                          options=['All'] + sorted(active_leads_df['sales_agent'].dropna().unique().tolist()))
+            with col2:
+                status_filter = st.selectbox('Filter by Status', 
+                                           options=['All'] + sorted(active_leads_df['status'].dropna().unique().tolist()))
+            with col3:
+                search_term = st.text_input('Search leads', placeholder='Name, number, or contact')
+            
+            # Apply filters
+            filtered_df = active_leads_df.copy()
+            if agent_filter != 'All':
+                filtered_df = filtered_df[filtered_df['sales_agent'] == agent_filter]
+            if status_filter != 'All':
+                filtered_df = filtered_df[filtered_df['status'] == status_filter]
+            if search_term:
+                mask = (filtered_df['name'].str.contains(search_term, case=False, na=False) |
+                       filtered_df['number'].str.contains(search_term, case=False, na=False) |
+                       filtered_df['contact'].str.contains(search_term, case=False, na=False))
+                filtered_df = filtered_df[mask]
+            
+            st.write(f'**Found {len(filtered_df)} leads to archive**')
+            
+            if not filtered_df.empty:
+                # Display leads in a selectable format
+                selected_leads = st.multiselect(
+                    'Select leads to archive:',
+                    options=filtered_df.apply(lambda x: f"ID: {x['id']} - {x['name']} ({x['sales_agent']}) - {x['status']}", axis=1).tolist(),
+                    help='Select multiple leads to archive'
+                )
+                
+                if selected_leads:
+                    # Extract lead IDs from selection
+                    lead_ids = []
+                    for selection in selected_leads:
+                        lead_id = int(selection.split(' - ')[0].replace('ID: ', ''))
+                        lead_ids.append(lead_id)
+                    
+                    # Archive form
+                    with st.form('archive_leads_form'):
+                        archive_reason = st.selectbox('Archive Reason', [
+                            'Completed/Closed',
+                            'No longer relevant',
+                            'Duplicate lead',
+                            'Wrong information',
+                            'Customer request',
+                            'System cleanup',
+                            'Other'
+                        ])
+                        custom_reason = st.text_area('Custom reason (optional)', 
+                                                   placeholder='Add additional details about why this lead is being archived')
+                        archive_date = st.date_input('Archive Date', value=date.today())
+                        
+                        if st.form_submit_button('🗄️ Archive Selected Leads'):
+                            if lead_ids:
+                                with get_session() as db:
+                                    final_reason = f"{archive_reason}"
+                                    if custom_reason.strip():
+                                        final_reason += f" - {custom_reason.strip()}"
+                                    
+                                    archived_count = bulk_archive_leads(
+                                        db, lead_ids, current_user.username, 
+                                        final_reason, datetime.combine(archive_date, datetime.min.time())
+                                    )
+                                    
+                                    if archived_count > 0:
+                                        st.success(f'✅ Successfully archived {archived_count} leads')
+                                        st.rerun()
+                                    else:
+                                        st.error('❌ Failed to archive leads')
+        else:
+            st.info('No active leads found to archive')
+    
+    with archive_tab2:
+        st.write('**View Archived Leads**')
+        
+        # Get archived leads
+        archived_leads_df, archived_total = read_leads_df(
+            filters={'is_archived': 'yes'}, 
+            limit=1000, 
+            offset=0, 
+            include_archived=True
+        )
+        
+        if not archived_leads_df.empty:
+            # Add archive information columns
+            archived_leads_df['archived_date'] = pd.to_datetime(archived_leads_df['archived_at']).dt.strftime('%Y-%m-%d %H:%M')
+            archived_leads_df['archive_reason_short'] = archived_leads_df['archive_reason'].str[:50] + '...'
+            
+            # Display archived leads
+            st.dataframe(
+                archived_leads_df[['id', 'name', 'sales_agent', 'status', 'archived_by', 'archived_date', 'archive_reason_short']],
+                use_container_width=True
+            )
+            
+            # Unarchive option
+            st.write('**Unarchive Leads**')
+            unarchive_selection = st.multiselect(
+                'Select leads to unarchive:',
+                options=archived_leads_df.apply(lambda x: f"ID: {x['id']} - {x['name']} (Archived: {x['archived_date']})", axis=1).tolist()
+            )
+            
+            if unarchive_selection and st.button('🔄 Unarchive Selected Leads'):
+                unarchive_ids = []
+                for selection in unarchive_selection:
+                    lead_id = int(selection.split(' - ')[0].replace('ID: ', ''))
+                    unarchive_ids.append(lead_id)
+                
+                with get_session() as db:
+                    unarchived_count = 0
+                    for lead_id in unarchive_ids:
+                        if unarchive_lead(db, lead_id, current_user.username):
+                            unarchived_count += 1
+                    
+                    if unarchived_count > 0:
+                        st.success(f'✅ Successfully unarchived {unarchived_count} leads')
+                        st.rerun()
+                    else:
+                        st.error('❌ Failed to unarchive leads')
+            
+            # Export archived leads
+            st.write('**Export Archived Leads**')
+            col1, col2 = st.columns(2)
+            with col1:
+                export_start_date = st.date_input('Export from date', value=date.today() - pd.Timedelta(days=30))
+                export_end_date = st.date_input('Export to date', value=date.today())
+            with col2:
+                export_format = st.selectbox('Export format', ['Excel', 'CSV'])
+                if st.button('📊 Export Archived Leads Report'):
+                    with get_session() as db:
+                        start_datetime = datetime.combine(export_start_date, datetime.min.time())
+                        end_datetime = datetime.combine(export_end_date, datetime.max.time())
+                        
+                        if export_format == 'Excel':
+                            excel_data = export_archived_leads_report(db, (start_datetime, end_datetime), 'excel')
+                            filename = f"Archived_Leads_{export_start_date}_{export_end_date}.xlsx"
+                            st.download_button(
+                                label=f'📥 Download {filename}',
+                                data=excel_data,
+                                file_name=filename,
+                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                            )
+                        else:
+                            csv_data = export_archived_leads_report(db, (start_datetime, end_datetime), 'csv')
+                            filename = f"Archived_Leads_{export_start_date}_{export_end_date}.csv"
+                            st.download_button(
+                                label=f'📥 Download {filename}',
+                                data=csv_data,
+                                file_name=filename,
+                                mime='text/csv'
+                            )
+        else:
+            st.info('No archived leads found')
+    
+    with archive_tab3:
+        st.write('**Bulk Archive by Criteria**')
+        
+        # Bulk archive options
+        col1, col2 = st.columns(2)
+        with col1:
+            bulk_agent = st.selectbox('Archive by Sales Agent', 
+                                    options=['All'] + sorted(active_leads_df['sales_agent'].dropna().unique().tolist()) if not active_leads_df.empty else ['All'])
+            bulk_status = st.selectbox('Archive by Status', 
+                                     options=['All'] + sorted(active_leads_df['status'].dropna().unique().tolist()) if not active_leads_df.empty else ['All'])
+        with col2:
+            bulk_days_old = st.number_input('Archive leads older than (days)', min_value=1, value=30)
+            bulk_reason = st.selectbox('Bulk Archive Reason', [
+                'System cleanup - old leads',
+                'Completed/Closed leads',
+                'No longer relevant',
+                'Duplicate cleanup',
+                'Other'
+            ])
+        
+        if st.button('🗄️ Bulk Archive by Criteria'):
+            with get_session() as db:
+                # Build query for bulk archive
+                q = db.query(Lead).filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'))
+                
+                if bulk_agent != 'All':
+                    q = q.filter(Lead.sales_agent == bulk_agent)
+                if bulk_status != 'All':
+                    q = q.filter(Lead.status == bulk_status)
+                
+                # Filter by age
+                cutoff_date = datetime.utcnow() - pd.Timedelta(days=bulk_days_old)
+                q = q.filter(Lead.uploaded_at <= cutoff_date)
+                
+                leads_to_archive = q.all()
+                
+                if leads_to_archive:
+                    lead_ids = [lead.id for lead in leads_to_archive]
+                    archived_count = bulk_archive_leads(
+                        db, lead_ids, current_user.username, 
+                        bulk_reason, datetime.utcnow()
+                    )
+                    st.success(f'✅ Bulk archived {archived_count} leads')
+                    st.rerun()
+                else:
+                    st.info('No leads match the bulk archive criteria')
+    
+    with archive_tab4:
+        st.write('**Archive Leads by Date**')
+        
+        # Date-based archiving
+        col1, col2 = st.columns(2)
+        with col1:
+            archive_start_date = st.date_input('Start Date', value=date.today() - pd.Timedelta(days=30))
+            archive_end_date = st.date_input('End Date', value=date.today())
+        with col2:
+            date_archive_reason = st.selectbox('Date Archive Reason', [
+                'Date-based cleanup',
+                'Old leads cleanup',
+                'System maintenance',
+                'Other'
+            ])
+        
+        if st.button('🗄️ Archive Leads by Date Range'):
+            with get_session() as db:
+                start_datetime = datetime.combine(archive_start_date, datetime.min.time())
+                end_datetime = datetime.combine(archive_end_date, datetime.max.time())
+                
+                # Get leads in date range
+                q = db.query(Lead).filter(
+                    sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no'),
+                    Lead.uploaded_at >= start_datetime,
+                    Lead.uploaded_at <= end_datetime
+                )
+                
+                leads_in_range = q.all()
+                
+                if leads_in_range:
+                    lead_ids = [lead.id for lead in leads_in_range]
+                    archived_count = bulk_archive_leads(
+                        db, lead_ids, current_user.username, 
+                        f"{date_archive_reason} ({archive_start_date} to {archive_end_date})", 
+                        datetime.utcnow()
+                    )
+                    st.success(f'✅ Archived {archived_count} leads from {archive_start_date} to {archive_end_date}')
+                    st.rerun()
+                else:
+                    st.info(f'No leads found in date range {archive_start_date} to {archive_end_date}')
+        
+        # View archived leads by date
+        st.write('**View Archived Leads by Date**')
+        view_date = st.date_input('View archived on date', value=date.today())
+        
+        if st.button('📅 View Archived by Date'):
+            with get_session() as db:
+                archived_on_date = get_archived_leads_by_date(db, view_date.strftime('%Y-%m-%d'))
+                
+                if archived_on_date:
+                    archived_df = pd.DataFrame([{
+                        'id': lead.id,
+                        'name': lead.name,
+                        'sales_agent': lead.sales_agent,
+                        'status': lead.status,
+                        'archived_by': lead.archived_by,
+                        'archived_at': lead.archived_at.strftime('%Y-%m-%d %H:%M') if lead.archived_at else '',
+                        'archive_reason': lead.archive_reason
+                    } for lead in archived_on_date])
+                    
+                    st.write(f'**Leads archived on {view_date}:**')
+                    st.dataframe(archived_df, use_container_width=True)
+                else:
+                    st.info(f'No leads were archived on {view_date}')
+    
+    # Archive Summary Dashboard
+    st.markdown('---')
+    st.subheader('📊 Archive Summary Dashboard')
+    
+    with get_session() as db:
+        # Get archive statistics
+        total_archived = db.query(Lead).filter(Lead.is_archived == 'yes').count()
+        total_active = db.query(Lead).filter(sa.or_(Lead.is_archived.is_(None), Lead.is_archived == 'no')).count()
+        
+        # Archive by reason
+        archive_reasons = db.query(Lead.archive_reason, func.count(Lead.id)).filter(
+            Lead.is_archived == 'yes'
+        ).group_by(Lead.archive_reason).all()
+        
+        # Archive by date (last 30 days)
+        thirty_days_ago = datetime.utcnow() - pd.Timedelta(days=30)
+        recent_archives = db.query(func.date(Lead.archived_at), func.count(Lead.id)).filter(
+            Lead.is_archived == 'yes',
+            Lead.archived_at >= thirty_days_ago
+        ).group_by(func.date(Lead.archived_at)).order_by(func.date(Lead.archived_at)).all()
+        
+        # Archive by agent
+        archive_by_agent = db.query(Lead.archived_by, func.count(Lead.id)).filter(
+            Lead.is_archived == 'yes'
+        ).group_by(Lead.archived_by).all()
+    
+    # Display summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric('Total Active Leads', total_active)
+    with col2:
+        st.metric('Total Archived Leads', total_archived)
+    with col3:
+        archive_rate = (total_archived / (total_active + total_archived) * 100) if (total_active + total_archived) > 0 else 0
+        st.metric('Archive Rate', f'{archive_rate:.1f}%')
+    with col4:
+        recent_count = sum(count for _, count in recent_archives)
+        st.metric('Archived (30 days)', recent_count)
+    
+    # Charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if archive_reasons:
+            reasons_df = pd.DataFrame(archive_reasons, columns=['Reason', 'Count'])
+            fig_reasons = px.pie(reasons_df, values='Count', names='Reason', title='Archives by Reason')
+            st.plotly_chart(fig_reasons, use_container_width=True)
+        else:
+            st.info('No archive reasons data available')
+    
+    with col2:
+        if archive_by_agent:
+            agents_df = pd.DataFrame(archive_by_agent, columns=['Agent', 'Count'])
+            fig_agents = px.bar(agents_df, x='Agent', y='Count', title='Archives by Agent')
+            st.plotly_chart(fig_agents, use_container_width=True)
+        else:
+            st.info('No archive by agent data available')
+    
+    # Recent archive trend
+    if recent_archives:
+        recent_df = pd.DataFrame(recent_archives, columns=['Date', 'Count'])
+        recent_df['Date'] = pd.to_datetime(recent_df['Date'])
+        fig_trend = px.line(recent_df, x='Date', y='Count', title='Archive Trend (Last 30 Days)')
+        st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info('No recent archive data available')
 
 elif role == 'ceo':
     st.header('CEO — Executive Dashboard & Reports')
