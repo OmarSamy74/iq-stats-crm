@@ -1216,7 +1216,7 @@ elif role == 'cto':
                     st.plotly_chart(dd_fig2, use_container_width=True)
 
 elif role == 'ceo':
-    st.header('CEO — Reports & Exports')
+    st.header('CEO — Executive Dashboard & Reports')
     df_all, total = read_leads_df(limit=10000, offset=0)
     if df_all.empty:
         st.info('No data yet')
@@ -1230,6 +1230,183 @@ elif role == 'ceo':
         c1.metric('Total Leads', total_leads)
         c2.metric('Unique Contacts', unique_contacts)
         c3.metric('Top Agent', top_agent)
+
+        # CTO Analytics Section for CEO
+        st.markdown('---')
+        st.subheader('📊 CTO Analytics Dashboard')
+        
+        # Create all the charts that CTO sees
+        df_f = df_all.copy()
+        charts_data = {}
+        
+        try:
+            # 1. Time series chart
+            if not df_f.empty:
+                df_f['uploaded_at'] = pd.to_datetime(df_f['uploaded_at'])
+                daily = df_f.groupby(df_f['uploaded_at'].dt.date).size().reset_index(name='count')
+                daily.columns = ['date', 'count']
+                if not daily.empty:
+                    fig_time = px.line(daily, x='date', y='count', title='Leads per day')
+                    st.plotly_chart(fig_time, use_container_width=True)
+                    charts_data['daily_leads'] = daily
+            
+            # 2. Agent breakdown
+            agent_counts = df_f['sales_agent'].value_counts().reset_index()
+            agent_counts.columns = ['agent', 'leads']
+            if not agent_counts.empty:
+                fig_agents = px.bar(agent_counts, x='agent', y='leads', title='Leads by agent')
+                st.plotly_chart(fig_agents, use_container_width=True)
+                charts_data['agent_breakdown'] = agent_counts
+            
+            # 3. Status breakdown
+            status_counts = df_f['status'].value_counts().reset_index()
+            status_counts.columns = ['status', 'count']
+            if not status_counts.empty:
+                fig_status = px.pie(status_counts, values='count', names='status', title='Lead status distribution')
+                st.plotly_chart(fig_status, use_container_width=True)
+                charts_data['status_breakdown'] = status_counts
+            
+            # 4. Sales Pipeline Funnel
+            st.subheader('Sales Pipeline — Funnel Analysis')
+            ordered_status = ['new','contacted','qualified','won','lost']
+            counts_map = {s: int((df_f['status'] == s).sum()) for s in ordered_status}
+            funnel_df = pd.DataFrame({'status': list(counts_map.keys()), 'count': list(counts_map.values())})
+            fig_funnel = px.funnel(funnel_df, x='count', y='status', title='Lead Conversion Funnel')
+            st.plotly_chart(fig_funnel, use_container_width=True)
+            charts_data['sales_funnel'] = funnel_df
+            
+            # 5. Contact method analysis
+            st.subheader('Contact Methods by Agent')
+            cm = df_f.dropna(subset=['sales_agent','contact'])
+            if not cm.empty:
+                cm_counts = cm.groupby(['sales_agent','contact']).size().reset_index(name='count')
+                fig_cm = px.bar(cm_counts, x='sales_agent', y='count', color='contact', barmode='stack', title='Contact methods by agent')
+                st.plotly_chart(fig_cm, use_container_width=True)
+                charts_data['contact_methods'] = cm_counts
+            
+            # 6. Heatmap analysis
+            st.subheader('Lead Activity Heatmap')
+            if not df_f.empty:
+                tmp = df_f.copy()
+                tmp['weekday'] = tmp['uploaded_at'].dt.day_name()
+                tmp['hour'] = tmp['uploaded_at'].dt.hour
+                heat = tmp.groupby(['weekday','hour']).size().reset_index(name='count')
+                if not heat.empty:
+                    fig_heat = px.density_heatmap(heat, x='hour', y='weekday', z='count', histfunc='avg', title='Lead uploads by time')
+                    st.plotly_chart(fig_heat, use_container_width=True)
+                    charts_data['activity_heatmap'] = heat
+            
+            # 7. Rolling average
+            st.subheader('Trends Analysis')
+            if not daily.empty:
+                daily_ra = daily.sort_values('date').copy()
+                daily_ra['rolling_7d'] = daily_ra['count'].rolling(window=7, min_periods=1).mean()
+                fig_ra = px.line(daily_ra, x='date', y=['count','rolling_7d'], labels={'value':'leads','variable':'series'}, title='Daily leads with 7-day trend')
+                st.plotly_chart(fig_ra, use_container_width=True)
+                charts_data['trends'] = daily_ra
+            
+        except Exception as e:
+            st.error(f'Error generating charts: {str(e)}')
+        
+        # Download all charts and data as ZIP
+        st.markdown('---')
+        st.subheader('📦 Download Complete Analytics Package')
+        
+        from datetime import datetime
+        import zipfile
+        
+        # Generate filename with current day and date
+        now = datetime.now()
+        day_name = now.strftime('%A')  # Full day name (e.g., 'Monday')
+        date_str = now.strftime('%Y-%m-%d')  # Date format (e.g., '2024-08-09')
+        zip_filename = f"IQ_Stats_CRM_Analytics_{day_name}_{date_str}.zip"
+        
+        if st.button('📊 Generate & Download Analytics Package'):
+            try:
+                # Create ZIP file in memory
+                zip_buffer = io.BytesIO()
+                
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Add all chart data as Excel sheets
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        # Main data
+                        df_all.to_excel(writer, sheet_name='All_Leads', index=False)
+                        
+                        # Chart data
+                        for chart_name, chart_df in charts_data.items():
+                            if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                                chart_df.to_excel(writer, sheet_name=chart_name.replace('_', ' ').title()[:31], index=False)
+                        
+                        # Summary statistics
+                        summary_data = {
+                            'Metric': ['Total Leads', 'Unique Contacts', 'Top Agent', 'Active Salesmen', 'Conversion Rate'],
+                            'Value': [
+                                total_leads,
+                                unique_contacts,
+                                top_agent,
+                                len(agent_counts) if 'agent_breakdown' in charts_data else 0,
+                                f"{(df_f['status'] == 'won').sum() / len(df_f) * 100:.1f}%" if not df_f.empty else "0%"
+                            ]
+                        }
+                        pd.DataFrame(summary_data).to_excel(writer, sheet_name='Executive_Summary', index=False)
+                    
+                    # Add Excel file to ZIP
+                    zip_file.writestr(f'CRM_Analytics_{date_str}.xlsx', excel_buffer.getvalue())
+                    
+                    # Add deals data if available
+                    deals_df, _ = read_deals_df(limit=100000)
+                    if not deals_df.empty:
+                        deals_buffer = io.BytesIO()
+                        with pd.ExcelWriter(deals_buffer, engine='openpyxl') as deals_writer:
+                            deals_df.to_excel(deals_writer, sheet_name='All_Deals', index=False)
+                            
+                            # Deals summary
+                            deals_summary = deals_df.groupby('uploaded_by').size().reset_index(name='deals_count')
+                            deals_summary.to_excel(deals_writer, sheet_name='Deals_by_Agent', index=False)
+                        
+                        zip_file.writestr(f'Deals_Report_{date_str}.xlsx', deals_buffer.getvalue())
+                    
+                    # Add a README file
+                    readme_content = f"""IQ Stats CRM Analytics Package
+Generated on: {now.strftime('%A, %B %d, %Y at %H:%M')}
+Generated for: CEO Dashboard
+
+Contents:
+- CRM_Analytics_{date_str}.xlsx: Complete leads analysis with all charts data
+- Deals_Report_{date_str}.xlsx: Deals tracking and performance data
+
+Chart Data Included:
+- Daily leads trends
+- Agent performance breakdown
+- Lead status distribution
+- Sales funnel analysis
+- Contact method analysis
+- Activity heatmaps
+- Rolling averages and trends
+
+Executive Summary:
+- Total Leads: {total_leads}
+- Unique Contacts: {unique_contacts}
+- Top Performing Agent: {top_agent}
+
+This package contains comprehensive analytics for strategic decision making.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                # Offer download
+                st.download_button(
+                    label=f'📥 Download {zip_filename}',
+                    data=zip_buffer.getvalue(),
+                    file_name=zip_filename,
+                    mime='application/zip',
+                    help=f'Download complete analytics package for {day_name}, {date_str}'
+                )
+                
+                st.success(f'✅ Analytics package ready! Contains all CTO dashboard charts and executive reports for {day_name}, {date_str}')
+                
+            except Exception as e:
+                st.error(f'Error creating analytics package: {str(e)}')
 
         st.markdown('---')
         st.subheader('Download reports')
