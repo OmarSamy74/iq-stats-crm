@@ -139,6 +139,11 @@ class LoginEvent(Base):
     role = Column(String, nullable=False)
     logged_in_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+class Setting(Base):
+    __tablename__ = 'settings'
+    key = Column(String, primary_key=True)
+    value = Column(String)
+
 Base.metadata.create_all(bind=engine)
 
 # Ensure DB schema matches current models (adds new columns if missing)
@@ -199,6 +204,14 @@ def ensure_schema():
             username VARCHAR NOT NULL,
             role VARCHAR NOT NULL,
             logged_in_at DATETIME
+        )
+        """)
+
+        # Settings table
+        conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key VARCHAR PRIMARY KEY,
+            value VARCHAR
         )
         """)
 
@@ -493,7 +506,15 @@ if role == 'salesman':
     st.header('Sales')
     tab_leads, tab_deals = st.tabs(['Upload & Manage Leads', 'Done Deals'])
     with tab_leads:
-        uploaded_file = st.file_uploader('Upload XLSX/CSV with headers: number, name, sales agent, CONTACT, CASE, FEED BACK', type=['xlsx','xls','csv'])
+        # Check central lock for uploads
+        with get_session() as _db_set:
+            lock_row = _db_set.query(Setting).filter(Setting.key == 'uploads_locked').first()
+            uploads_locked = (lock_row and (lock_row.value or '').lower() in ('1','true','yes','on'))
+        uploaded_file = None
+        if uploads_locked:
+            st.warning('Uploads are temporarily disabled by CTO/Admin. You can still manage existing leads below.')
+        else:
+            uploaded_file = st.file_uploader('Upload XLSX/CSV with headers: number, name, sales agent, CONTACT, CASE, FEED BACK', type=['xlsx','xls','csv'])
         # Provide a ready-to-use template
         if st.button('Download Excel template'):
             template = pd.DataFrame({
@@ -522,7 +543,7 @@ if role == 'salesman':
             st.subheader('Preview')
             st.dataframe(df.head())
 
-        if st.button('Save to CRM'):
+        if not uploads_locked and st.button('Save to CRM'):
             # map columns
             col_map = {c.lower().strip(): c for c in df.columns}
             mapping = {}
@@ -753,15 +774,157 @@ elif role == 'head_of_sales':
         st.subheader('KPIs')
         c1, c2, c3 = st.columns(3)
         c1.metric('Total Leads', total)
-        top_agent = df['sales_agent'].value_counts().idxmax() if not df.empty else '—'
+        vc = df['sales_agent'].value_counts()
+        top_agent = (vc.idxmax() if not vc.empty else '—')
         c2.metric('Top Agent', top_agent)
         c3.metric('Unique Contacts', int(df['contact'].nunique()))
 
+    st.markdown('---')
+    st.subheader('Recently Assigned to Salesmen')
+    with get_session() as _db_recent:
+        recent = (
+            _db_recent.query(Lead)
+            .filter(Lead.assigned_to.isnot(None))
+            .order_by(Lead.uploaded_at.desc())
+            .limit(50)
+            .all()
+        )
+        if recent:
+            rec_df = pd.DataFrame([
+                {
+                    'id': l.id,
+                    'name': l.name,
+                    'number': l.number,
+                    'assigned_to': l.assigned_to,
+                    'status': l.status,
+                    'uploaded_at': l.uploaded_at
+                } for l in recent
+            ])
+            st.dataframe(rec_df)
+        else:
+            st.info('No assignments yet.')
+
 elif role == 'cto':
     st.header('CTO Dashboard — Analytics')
+    # --- CTO uploader (centralized uploads) ---
+    with st.expander('Upload Leads (CTO)'):
+        # Salesmen list for default assignment
+        with get_session() as _db_cto_sales:
+            cto_salesmen = [u.username for u in _db_cto_sales.query(User).filter(User.role=='salesman').order_by(User.username.asc()).all()]
+        default_agent_opt = ['(keep from file)'] + cto_salesmen
+        default_agent = st.selectbox('Default sales agent (optional)', options=default_agent_opt)
+        cto_uploaded = st.file_uploader('XLSX/CSV with headers: number, name, sales agent, CONTACT, CASE, FEED BACK', type=['xlsx','xls','csv'], key='cto_uploader')
+        col_left, col_right = st.columns(2)
+        with col_left:
+            if st.button('Download Excel template (CTO)'):
+                template = pd.DataFrame({
+                    'number': [],
+                    'name': [],
+                    'sales agent': [],
+                    'contact': [],
+                    'case': [],
+                    'feed back': [],
+                    'how to contact': [],
+                })
+                buf_t = io.BytesIO()
+                with pd.ExcelWriter(buf_t, engine='openpyxl') as writer:
+                    template.to_excel(writer, index=False, sheet_name='template')
+                st.download_button('Download CTO template.xlsx', data=buf_t.getvalue(), file_name='crm_leads_template_cto.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        if cto_uploaded is not None:
+            try:
+                if cto_uploaded.name.endswith('.csv'):
+                    cto_df = pd.read_csv(cto_uploaded)
+                else:
+                    cto_df = pd.read_excel(cto_uploaded)
+            except Exception as e:
+                st.error(f'Failed to read file: {e}')
+                cto_df = None
+            if cto_df is not None:
+                st.dataframe(cto_df.head())
+                if st.button('Save uploaded leads (CTO)'):
+                    col_map = {c.lower().strip(): c for c in cto_df.columns}
+                    mapping = {}
+                    expected = ['number','name','sales agent','contact','case','feed back']
+                    for k in expected:
+                        if k in col_map:
+                            mapping[col_map[k]] = k
+                    alt_map = {
+                        'sales_agent':'sales agent','salesagent':'sales agent',
+                        'feedback':'feed back','case_desc':'case',
+                        'contact_number':'contact','phone':'contact',
+                        'how to contact':'contact','how_to_contact':'contact','contact method':'contact'
+                    }
+                    for k,v in alt_map.items():
+                        if k in col_map and v not in mapping.values():
+                            mapping[col_map[k]] = v
+                    df_ren = cto_df.rename(columns=mapping)
+                    for tgt in ['number','name','sales agent','contact','case','feed back']:
+                        if tgt not in df_ren.columns:
+                            df_ren[tgt] = None
+                    saved = 0
+                    with get_session() as db:
+                        for _, row in df_ren.iterrows():
+                            agent_from_file = str(row['sales agent']) if row['sales agent'] is not None else None
+                            final_agent = agent_from_file
+                            if (not final_agent or final_agent.strip()=='') and default_agent != '(keep from file)':
+                                final_agent = default_agent
+                            lead = Lead(
+                                number=str(row['number']) if row['number'] is not None else None,
+                                name=str(row['name']) if row['name'] is not None else None,
+                                sales_agent=str(final_agent) if final_agent else None,
+                                contact=str(row['contact']) if row['contact'] is not None else None,
+                                case_desc=str(row['case']) if row['case'] is not None else None,
+                                feedback=str(row['feed back']) if row['feed back'] is not None else None,
+                                uploaded_by=current_user.username,
+                                uploaded_by_id=getattr(current_user, 'id', None),
+                                uploaded_at=datetime.utcnow(),
+                                assigned_to=str(final_agent) if final_agent else None,
+                            )
+                            db.add(lead)
+                            db.flush()
+                            log_activity(db, lead.id, current_user.username, 'upload', detail='CTO upload')
+                            saved += 1
+                        db.commit()
+                    st.success(f'Saved {saved} leads')
+                    st.rerun()
+
     df_all, total = read_leads_df(limit=10000, offset=0)
     if df_all.empty:
-        st.info('No data yet.')
+        st.info('No data yet. Upload leads (Sales tab) or generate demo leads below.')
+        with st.expander('Demo tools (dev)'):
+            n = st.number_input('How many demo leads to generate?', min_value=10, max_value=2000, value=200, step=10)
+            if st.button('Generate demo leads'):
+                try:
+                    with get_session() as db:
+                        sales_users = [u.username for u in db.query(User).filter(User.role=='salesman').all()]
+                        if not sales_users:
+                            u = create_user(db, 'sales_auto', 'pass', role='salesman', name='Sales Auto')
+                            sales_users = [u.username]
+                        contact_opts = ['call', 'call and whatsapp', "didn't reach"]
+                        case_opts = ['general', 'pricing', 'technical', 'support', 'complaint', 'other']
+                        feedback_opts = ['positive', 'neutral', 'negative', 'not interested', 'call later', 'wrong number', 'closed won', 'closed lost', 'other']
+                        status_opts = ['new','contacted','qualified','won','lost']
+                        now = datetime.utcnow()
+                        for i in range(int(n)):
+                            agent = random.choice(sales_users)
+                            lead = Lead(
+                                number=str(100000 + random.randint(0, 999999)),
+                                name=f"Lead {i+1}",
+                                sales_agent=agent,
+                                contact=random.choice(contact_opts),
+                                case_desc=random.choice(case_opts),
+                                feedback=random.choice(feedback_opts),
+                                status=random.choice(status_opts),
+                                assigned_to=agent,
+                                uploaded_by='demo',
+                                uploaded_at=now - pd.Timedelta(days=random.randint(0, 60), hours=random.randint(0,23))
+                            )
+                            db.add(lead)
+                        db.commit()
+                    st.success('Demo leads generated. Reloading dashboard...')
+                    st.rerun()
+                except Exception as e:
+                    st.error(f'Failed to generate demo leads: {e}')
     else:
         # Helpers for categorical charts
         def _normalize_text(value: str):
@@ -787,10 +950,109 @@ elif role == 'cto':
 
         df_all['uploaded_at'] = pd.to_datetime(df_all['uploaded_at'])
         df_all['date'] = df_all['uploaded_at'].dt.date
+
+        # Filters
+        min_date = df_all['date'].min()
+        max_date = df_all['date'].max()
+        c_f1, c_f2, c_f3 = st.columns([2,2,3])
+        with c_f1:
+            date_range = st.date_input('Date range', value=(min_date, max_date))
+        with c_f2:
+            agents_all = sorted([a for a in df_all['sales_agent'].dropna().unique().tolist()])
+            sel_agents = st.multiselect('Agents', options=agents_all, default=agents_all)
+        with c_f3:
+            status_all = ['new','contacted','qualified','won','lost']
+            sel_statuses = st.multiselect('Statuses', options=status_all, default=status_all)
+
+        # Apply filters
+        df_f = df_all.copy()
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+            df_f = df_f[(df_f['uploaded_at'] >= start_d) & (df_f['uploaded_at'] <= (end_d + pd.Timedelta(days=1)))]
+        if sel_agents:
+            df_f = df_f[df_f['sales_agent'].isin(sel_agents)]
+        if sel_statuses:
+            df_f = df_f[df_f['status'].isin(sel_statuses)]
+
         st.subheader('Leads over time')
-        daily = df_all.groupby('date').size().reset_index(name='count')
+        daily = df_f.groupby('date').size().reset_index(name='count')
         fig = px.line(daily, x='date', y='count', title='Leads per day')
         st.plotly_chart(fig, use_container_width=True)
+
+        # Lead Assignment (CTO)
+        st.markdown('---')
+        st.subheader('Lead Assignment')
+        # Toggle uploads lock for salesmen
+        with get_session() as _db_lock:
+            lock_row = _db_lock.query(Setting).filter(Setting.key=='uploads_locked').first()
+            cur_locked = (lock_row and (lock_row.value or '').lower() in ('1','true','yes','on'))
+        new_locked = st.toggle('Lock salesman uploads', value=cur_locked, help='Prevent salesmen from uploading files')
+        if new_locked != cur_locked:
+            with get_session() as _db_lock2:
+                row = _db_lock2.query(Setting).filter(Setting.key=='uploads_locked').first()
+                if not row:
+                    row = Setting(key='uploads_locked', value='1' if new_locked else '0')
+                    _db_lock2.add(row)
+                else:
+                    row.value = '1' if new_locked else '0'
+                _db_lock2.commit()
+            st.success('Upload lock setting updated')
+        with get_session() as _db_assign:
+            # consider unassigned as sales_agent is null/empty/'unassigned' OR assigned_to is null
+            unassigned = (
+                _db_assign.query(Lead)
+                .filter(
+                    sa.or_(
+                        Lead.sales_agent.is_(None),
+                        func.trim(Lead.sales_agent) == '',
+                        func.lower(func.trim(Lead.sales_agent)) == 'unassigned',
+                        Lead.assigned_to.is_(None)
+                    )
+                )
+                .order_by(Lead.uploaded_at.desc())
+                .all()
+            )
+            st.write(f"Unassigned leads: {len(unassigned)}")
+        with get_session() as _db_users:
+            salesman_users = [u.username for u in _db_users.query(User).filter(User.role == 'salesman').order_by(User.username.asc()).all()]
+        target_agents = st.multiselect('Select salesmen to distribute to', options=salesman_users, default=salesman_users)
+        max_to_assign = st.number_input('Max leads to distribute (0 = all)', min_value=0, value=0, step=1)
+        if st.button('Distribute unassigned leads equally'):
+            if not target_agents:
+                st.warning('Select at least one salesman.')
+            else:
+                with get_session() as db:
+                    leads = (
+                        db.query(Lead)
+                        .filter(
+                            sa.or_(
+                                Lead.sales_agent.is_(None),
+                                func.trim(Lead.sales_agent) == '',
+                                func.lower(func.trim(Lead.sales_agent)) == 'unassigned',
+                                Lead.assigned_to.is_(None)
+                            )
+                        )
+                        .order_by(Lead.uploaded_at.asc())
+                        .all()
+                    )
+                    if max_to_assign and max_to_assign > 0:
+                        leads = leads[:max_to_assign]
+                    if not leads:
+                        st.info('No unassigned leads to distribute.')
+                    else:
+                        random.shuffle(leads)
+                        assigned_count = {a: 0 for a in target_agents}
+                        for idx, lead in enumerate(leads):
+                            agent = target_agents[idx % len(target_agents)]
+                            lead.sales_agent = agent
+                            lead.assigned_to = agent
+                            db.add(lead)
+                            db.flush()
+                            log_activity(db, lead.id, current_user.username, 'assign', detail=f'Assigned to {agent} by CTO')
+                            assigned_count[agent] += 1
+                        db.commit()
+                        st.success('Distribution completed: ' + ', '.join([f"{a}: {n}" for a, n in assigned_count.items()]))
+                        st.rerun()
 
         # Demo: randomize statuses to see distribution (dev use)
         with st.expander('Demo tools (dev)'):
@@ -804,7 +1066,7 @@ elif role == 'cto':
                 st.success('Statuses randomized. Refresh charts above.')
 
         st.subheader('Leads by agent')
-        agent_counts = df_all['sales_agent'].value_counts().reset_index()
+        agent_counts = df_f['sales_agent'].value_counts().reset_index()
         agent_counts.columns = ['sales_agent','count']
         fig2 = px.bar(agent_counts, x='sales_agent', y='count', title='Leads by Agent')
         st.plotly_chart(fig2, use_container_width=True)
@@ -834,7 +1096,7 @@ elif role == 'cto':
             st.info('Login activity not available yet.')
 
         st.subheader('Status breakdown')
-        status_counts = df_all['status'].value_counts().reset_index()
+        status_counts = df_f['status'].value_counts().reset_index()
         status_counts.columns = ['status','count']
         fig3 = px.pie(status_counts, names='status', values='count', title='Leads by Status')
         st.plotly_chart(fig3, use_container_width=True)
@@ -842,7 +1104,7 @@ elif role == 'cto':
         # Leads by status per salesman (stacked)
         st.subheader('Leads by Status per Salesman')
         status_per_sales = (
-            df_all.dropna(subset=['sales_agent','status'])
+            df_f.dropna(subset=['sales_agent','status'])
                   .groupby(['sales_agent','status'])
                   .size()
                   .reset_index(name='count')
@@ -858,7 +1120,7 @@ elif role == 'cto':
             st.info('No data for status per salesman yet.')
 
         st.subheader('Feedback word cloud-ish (top words)')
-        feedbacks = df_all['feedback'].dropna().astype(str)
+        feedbacks = df_f['feedback'].dropna().astype(str)
         if not feedbacks.empty:
             all_text = ' '.join(feedbacks.tolist()).lower()
             words = [w.strip('.,!?:;()"\'') for w in all_text.split() if len(w) > 3]
@@ -874,21 +1136,64 @@ elif role == 'cto':
 
         st.subheader('HOW TO CONTACT — top categories')
         try:
-            _plot_top_categories(df_all, 'contact', 'Contact method — top categories')
+            _plot_top_categories(df_f, 'contact', 'Contact method — top categories')
         except Exception:
             st.info('No values in contact to plot.')
 
         st.subheader('CASE — top categories')
         try:
-            _plot_top_categories(df_all, 'case_desc', 'Case — top categories')
+            _plot_top_categories(df_f, 'case_desc', 'Case — top categories')
         except Exception:
             st.info('No values in case_desc to plot.')
 
         st.subheader('FEED BACK — top categories')
         try:
-            _plot_top_categories(df_all, 'feedback', 'Feedback — top categories')
+            _plot_top_categories(df_f, 'feedback', 'Feedback — top categories')
         except Exception:
             st.info('No values in feedback to plot.')
+
+        # Additional charts
+        st.subheader('Sales Pipeline — Funnel')
+        try:
+            ordered_status = ['new','contacted','qualified','won','lost']
+            counts_map = {s: int((df_f['status'] == s).sum()) for s in ordered_status}
+            funnel_df = pd.DataFrame({'status': list(counts_map.keys()), 'count': list(counts_map.values())})
+            fig_funnel = px.funnel(funnel_df, x='count', y='status', title='Lead Funnel')
+            st.plotly_chart(fig_funnel, use_container_width=True)
+        except Exception:
+            pass
+
+        st.subheader('Contact method by agent')
+        cm = df_f.dropna(subset=['sales_agent','contact'])
+        if not cm.empty:
+            cm_counts = cm.groupby(['sales_agent','contact']).size().reset_index(name='count')
+            fig_cm = px.bar(cm_counts, x='sales_agent', y='count', color='contact', barmode='stack', title='Contact methods by agent')
+            st.plotly_chart(fig_cm, use_container_width=True)
+
+        st.subheader('Lead uploads heatmap (weekday x hour)')
+        if not df_f.empty:
+            tmp = df_f.copy()
+            tmp['weekday'] = tmp['uploaded_at'].dt.day_name()
+            tmp['hour'] = tmp['uploaded_at'].dt.hour
+            heat = tmp.groupby(['weekday','hour']).size().reset_index(name='count')
+            if not heat.empty:
+                fig_heat = px.density_heatmap(heat, x='hour', y='weekday', z='count', histfunc='avg', title='Uploads heatmap')
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+        st.subheader('Leads per day (7-day rolling avg)')
+        if not daily.empty:
+            daily_ra = daily.sort_values('date').copy()
+            daily_ra['rolling_7d'] = daily_ra['count'].rolling(window=7, min_periods=1).mean()
+            fig_ra = px.line(daily_ra, x='date', y=['count','rolling_7d'], labels={'value':'leads','variable':'series'}, title='Daily leads and 7d avg')
+            st.plotly_chart(fig_ra, use_container_width=True)
+
+        st.subheader('Export filtered leads')
+        csv_bytes = df_f.to_csv(index=False).encode('utf-8')
+        st.download_button('Download CSV (filtered)', data=csv_bytes, file_name='leads_filtered.csv', mime='text/csv')
+        xls_buf = io.BytesIO()
+        with pd.ExcelWriter(xls_buf, engine='openpyxl') as writer:
+            df_f.to_excel(writer, index=False, sheet_name='leads_filtered')
+        st.download_button('Download Excel (filtered)', data=xls_buf.getvalue(), file_name='leads_filtered.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
         # Done deals charts (handles empty safely)
         st.markdown('---')
@@ -919,7 +1224,8 @@ elif role == 'ceo':
         st.subheader('Executive KPIs')
         total_leads = total
         unique_contacts = int(df_all['contact'].nunique())
-        top_agent = df_all['sales_agent'].value_counts().idxmax() if not df_all.empty else '—'
+        vc_all = df_all['sales_agent'].value_counts()
+        top_agent = (vc_all.idxmax() if not vc_all.empty else '—')
         c1, c2, c3 = st.columns(3)
         c1.metric('Total Leads', total_leads)
         c2.metric('Unique Contacts', unique_contacts)
