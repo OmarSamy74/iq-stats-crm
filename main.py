@@ -36,6 +36,7 @@ import os
 import math
 import zipfile
 import random
+import numpy as np
 
 # ----------------- Requirements (put in requirements.txt) -----------------
 # streamlit
@@ -374,8 +375,63 @@ def get_archived_leads_by_date(db, date_filter=None):
             )
     return q.order_by(Lead.archived_at.desc()).all()
 
-def export_archived_leads_report(db, date_range=None, format='excel'):
-    """Export archived leads report with date information"""
+def generate_archived_leads_analytics(df):
+    """Generate analytics data for archived leads"""
+    charts_data = {}
+    
+    if df.empty:
+        return charts_data
+    
+    # Convert date columns
+    df['archive_date'] = pd.to_datetime(df['Archive Date'])
+    df['upload_date'] = pd.to_datetime(df['Original Upload Date'])
+    
+    # 1. Daily archive trends
+    daily_archives = df.groupby(df['archive_date'].dt.date).size().reset_index(name='count')
+    daily_archives.columns = ['date', 'count']
+    charts_data['daily_archives'] = daily_archives
+    
+    # 2. Archive reasons breakdown
+    reason_counts = df['Archive Reason'].value_counts().reset_index()
+    reason_counts.columns = ['reason', 'count']
+    charts_data['archive_reasons'] = reason_counts
+    
+    # 3. Archived by breakdown
+    archiver_counts = df['Archived By'].value_counts().reset_index()
+    archiver_counts.columns = ['archiver', 'count']
+    charts_data['archivers'] = archiver_counts
+    
+    # 4. Original status distribution
+    status_counts = df['Status'].value_counts().reset_index()
+    status_counts.columns = ['status', 'count']
+    charts_data['original_status'] = status_counts
+    
+    # 5. Sales agent breakdown (original)
+    agent_counts = df['Sales Agent'].value_counts().reset_index()
+    agent_counts.columns = ['sales_agent', 'count']
+    charts_data['original_agents'] = agent_counts
+    
+    # 6. Contact methods breakdown
+    contact_counts = df['Contact Method'].value_counts().reset_index()
+    contact_counts.columns = ['contact', 'count']
+    charts_data['contact_methods'] = contact_counts
+    
+    # 7. Archive timing analysis (days between upload and archive)
+    df['days_to_archive'] = (df['archive_date'] - df['upload_date']).dt.days
+    timing_analysis = df['days_to_archive'].describe().reset_index()
+    timing_analysis.columns = ['metric', 'value']
+    charts_data['archive_timing'] = timing_analysis
+    
+    # 8. Monthly archive trends
+    monthly_archives = df.groupby(df['archive_date'].dt.to_period('M')).size().reset_index(name='count')
+    monthly_archives['month'] = monthly_archives['archive_date'].astype(str)
+    monthly_archives = monthly_archives[['month', 'count']]
+    charts_data['monthly_archives'] = monthly_archives
+    
+    return charts_data
+
+def export_archived_leads_report(db, date_range=None, format='excel', include_graphs=False):
+    """Export archived leads report with date information and optional graphs"""
     q = db.query(Lead).filter(Lead.is_archived == 'yes')
     
     if date_range:
@@ -414,6 +470,16 @@ def export_archived_leads_report(db, date_range=None, format='excel'):
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='Archived_Leads', index=False)
+            
+            # Add analytics sheets if graphs are requested
+            if include_graphs and not df.empty:
+                charts_data = generate_archived_leads_analytics(df)
+                
+                # Add analytics sheets
+                for chart_name, chart_df in charts_data.items():
+                    if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                        sheet_name = chart_name.replace('_', ' ').title()[:31]
+                        chart_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
             # Add summary sheet
             summary_data = {
@@ -817,6 +883,373 @@ def build_deals_images_zip(deals):
             ext = _detect_ext(content)
             zf.writestr(f'deal_{d.id}_payment.{ext}', content)
     return buf.getvalue()
+
+def generate_analytics_graphs(df, charts_data, date_str, title_prefix="Analytics"):
+    """Generate comprehensive analytics graphs and return as bytes for zip inclusion."""
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+        from plotly.subplots import make_subplots
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.backends.backend_pdf import PdfPages
+        import io
+        
+        # Create a PDF with multiple graphs
+        pdf_buffer = io.BytesIO()
+        
+        with PdfPages(pdf_buffer) as pdf:
+            # Set style
+            plt.style.use('seaborn-v0_8')
+            fig_width, fig_height = 12, 8
+            
+            # 1. Daily Leads Trend
+            if 'daily_leads' in charts_data and not charts_data['daily_leads'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                daily_data = charts_data['daily_leads']
+                ax.plot(daily_data['date'], daily_data['count'], marker='o', linewidth=2, markersize=6)
+                ax.set_title(f'{title_prefix} - Daily Leads Trend', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Date', fontsize=12)
+                ax.set_ylabel('Number of Leads', fontsize=12)
+                ax.grid(True, alpha=0.3)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 2. Agent Performance Breakdown
+            if 'agent_breakdown' in charts_data and not charts_data['agent_breakdown'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                agent_data = charts_data['agent_breakdown']
+                bars = ax.bar(agent_data['sales_agent'], agent_data['count'], 
+                             color=plt.cm.Set3(np.linspace(0, 1, len(agent_data))))
+                ax.set_title(f'{title_prefix} - Agent Performance Breakdown', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Sales Agent', fontsize=12)
+                ax.set_ylabel('Number of Leads', fontsize=12)
+                ax.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels on bars
+                for bar in bars:
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                           f'{int(height)}', ha='center', va='bottom', fontweight='bold')
+                
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 3. Lead Status Distribution
+            if 'status_breakdown' in charts_data and not charts_data['status_breakdown'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                status_data = charts_data['status_breakdown']
+                colors = ['#2E8B57', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+                wedges, texts, autotexts = ax.pie(status_data['count'], labels=status_data['status'], 
+                                                 autopct='%1.1f%%', colors=colors, startangle=90)
+                ax.set_title(f'{title_prefix} - Lead Status Distribution', fontsize=16, fontweight='bold')
+                
+                # Make percentage labels bold
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 4. Sales Funnel
+            if 'sales_funnel' in charts_data and not charts_data['sales_funnel'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                funnel_data = charts_data['sales_funnel']
+                stages = funnel_data['stage']
+                counts = funnel_data['count']
+                
+                # Create funnel chart
+                y_pos = np.arange(len(stages))
+                bars = ax.barh(y_pos, counts, color=plt.cm.viridis(np.linspace(0, 1, len(stages))))
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels(stages)
+                ax.set_xlabel('Number of Leads', fontsize=12)
+                ax.set_title(f'{title_prefix} - Sales Funnel', fontsize=16, fontweight='bold')
+                ax.grid(True, alpha=0.3, axis='x')
+                
+                # Add value labels
+                for i, (bar, count) in enumerate(zip(bars, counts)):
+                    ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
+                           f'{int(count)}', ha='left', va='center', fontweight='bold')
+                
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 5. Contact Methods Analysis
+            if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                contact_data = charts_data['contact_methods']
+                bars = ax.bar(contact_data['contact'], contact_data['count'], 
+                             color=plt.cm.Pastel1(np.linspace(0, 1, len(contact_data))))
+                ax.set_title(f'{title_prefix} - Contact Methods Analysis', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Contact Method', fontsize=12)
+                ax.set_ylabel('Number of Leads', fontsize=12)
+                ax.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels
+                for bar in bars:
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                           f'{int(height)}', ha='center', va='bottom', fontweight='bold')
+                
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 6. Activity Heatmap
+            if 'activity_heatmap' in charts_data and not charts_data['activity_heatmap'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                heat_data = charts_data['activity_heatmap']
+                
+                # Create heatmap
+                sns.heatmap(heat_data.pivot_table(index='hour', columns='day_of_week', values='count', fill_value=0),
+                           annot=True, fmt='d', cmap='YlOrRd', ax=ax)
+                ax.set_title(f'{title_prefix} - Activity Heatmap', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Day of Week', fontsize=12)
+                ax.set_ylabel('Hour of Day', fontsize=12)
+                
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 7. Trends Analysis (if available)
+            if 'trends' in charts_data and not charts_data['trends'].empty:
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                trends_data = charts_data['trends']
+                ax.plot(trends_data['date'], trends_data['count'], label='Daily Count', marker='o')
+                if 'rolling_avg' in trends_data.columns:
+                    ax.plot(trends_data['date'], trends_data['rolling_avg'], 
+                           label='7-Day Rolling Average', linewidth=2, color='red')
+                ax.set_title(f'{title_prefix} - Trends Analysis', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Date', fontsize=12)
+                ax.set_ylabel('Number of Leads', fontsize=12)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close()
+            
+            # 8. Summary Dashboard (Combined view)
+            fig = plt.figure(figsize=(16, 12))
+            fig.suptitle(f'{title_prefix} - Summary Dashboard', fontsize=20, fontweight='bold')
+            
+            # Create subplots
+            gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+            
+            # Key metrics
+            ax1 = fig.add_subplot(gs[0, :])
+            ax1.axis('off')
+            summary_text = f"""
+            {title_prefix} Summary Report - Generated on {date_str}
+            
+            Total Leads: {len(df)}
+            Date Range: {df['uploaded_at'].min().strftime('%Y-%m-%d') if not df.empty else 'N/A'} to {df['uploaded_at'].max().strftime('%Y-%m-%d') if not df.empty else 'N/A'}
+            Active Agents: {len(df['sales_agent'].unique()) if not df.empty else 0}
+            Conversion Rate: {(df['status'] == 'won').sum() / len(df) * 100:.1f}% if not df.empty else 0%
+            """
+            ax1.text(0.1, 0.5, summary_text, fontsize=14, verticalalignment='center',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
+            
+            # Status distribution (pie chart)
+            if 'status_breakdown' in charts_data and not charts_data['status_breakdown'].empty:
+                ax2 = fig.add_subplot(gs[1, 0])
+                status_data = charts_data['status_breakdown']
+                ax2.pie(status_data['count'], labels=status_data['status'], autopct='%1.1f%%', startangle=90)
+                ax2.set_title('Status Distribution')
+            
+            # Agent performance (bar chart)
+            if 'agent_breakdown' in charts_data and not charts_data['agent_breakdown'].empty:
+                ax3 = fig.add_subplot(gs[1, 1])
+                agent_data = charts_data['agent_breakdown'].head(5)  # Top 5 agents
+                ax3.bar(agent_data['sales_agent'], agent_data['count'])
+                ax3.set_title('Top 5 Agents')
+                plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Daily trend (line chart)
+            if 'daily_leads' in charts_data and not charts_data['daily_leads'].empty:
+                ax4 = fig.add_subplot(gs[1, 2])
+                daily_data = charts_data['daily_leads']
+                ax4.plot(daily_data['date'], daily_data['count'], marker='o')
+                ax4.set_title('Daily Trend')
+                plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Contact methods (horizontal bar)
+            if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
+                ax5 = fig.add_subplot(gs[2, :])
+                contact_data = charts_data['contact_methods']
+                ax5.barh(contact_data['contact'], contact_data['count'])
+                ax5.set_title('Contact Methods')
+                ax5.set_xlabel('Number of Leads')
+            
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close()
+        
+        return pdf_buffer.getvalue()
+        
+    except Exception as e:
+        # Fallback: create simple text report
+        report_buffer = io.BytesIO()
+        report_content = f"""
+{title_prefix} Report - Generated on {date_str}
+
+Summary Statistics:
+- Total Leads: {len(df)}
+- Date Range: {df['uploaded_at'].min().strftime('%Y-%m-%d') if not df.empty else 'N/A'} to {df['uploaded_at'].max().strftime('%Y-%m-%d') if not df.empty else 'N/A'}
+- Active Agents: {len(df['sales_agent'].unique()) if not df.empty else 0}
+- Conversion Rate: {(df['status'] == 'won').sum() / len(df) * 100:.1f}% if not df.empty else 0%
+
+Chart Data Available:
+{chr(10).join([f"- {chart_name}: {len(chart_df)} records" for chart_name, chart_df in charts_data.items() if isinstance(chart_df, pd.DataFrame)])}
+
+Note: Graphs could not be generated due to missing dependencies.
+Please ensure matplotlib, seaborn, and plotly are installed for full graph functionality.
+"""
+        report_buffer.write(report_content.encode('utf-8'))
+        return report_buffer.getvalue()
+
+def generate_plotly_graphs(df, charts_data, date_str, title_prefix="Analytics"):
+    """Generate interactive Plotly graphs and return as HTML files for zip inclusion."""
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+        from plotly.subplots import make_subplots
+        
+        graphs = {}
+        
+        # 1. Daily Leads Trend
+        if 'daily_leads' in charts_data and not charts_data['daily_leads'].empty:
+            daily_data = charts_data['daily_leads']
+            fig = px.line(daily_data, x='date', y='count', 
+                         title=f'{title_prefix} - Daily Leads Trend',
+                         markers=True)
+            fig.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Number of Leads",
+                template="plotly_white"
+            )
+            graphs['daily_leads_trend.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 2. Agent Performance Breakdown
+        if 'agent_breakdown' in charts_data and not charts_data['agent_breakdown'].empty:
+            agent_data = charts_data['agent_breakdown']
+            fig = px.bar(agent_data, x='sales_agent', y='count',
+                        title=f'{title_prefix} - Agent Performance Breakdown',
+                        color='count', color_continuous_scale='viridis')
+            fig.update_layout(
+                xaxis_title="Sales Agent",
+                yaxis_title="Number of Leads",
+                template="plotly_white"
+            )
+            graphs['agent_performance.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 3. Lead Status Distribution
+        if 'status_breakdown' in charts_data and not charts_data['status_breakdown'].empty:
+            status_data = charts_data['status_breakdown']
+            fig = px.pie(status_data, values='count', names='status',
+                        title=f'{title_prefix} - Lead Status Distribution')
+            fig.update_layout(template="plotly_white")
+            graphs['status_distribution.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 4. Sales Funnel
+        if 'sales_funnel' in charts_data and not charts_data['sales_funnel'].empty:
+            funnel_data = charts_data['sales_funnel']
+            fig = go.Figure(go.Funnel(
+                y=funnel_data['stage'],
+                x=funnel_data['count'],
+                textinfo="value+percent initial"
+            ))
+            fig.update_layout(
+                title=f'{title_prefix} - Sales Funnel',
+                template="plotly_white"
+            )
+            graphs['sales_funnel.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 5. Contact Methods Analysis
+        if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
+            contact_data = charts_data['contact_methods']
+            fig = px.bar(contact_data, x='contact', y='count',
+                        title=f'{title_prefix} - Contact Methods Analysis',
+                        color='count', color_continuous_scale='plasma')
+            fig.update_layout(
+                xaxis_title="Contact Method",
+                yaxis_title="Number of Leads",
+                template="plotly_white"
+            )
+            graphs['contact_methods.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 6. Activity Heatmap
+        if 'activity_heatmap' in charts_data and not charts_data['activity_heatmap'].empty:
+            heat_data = charts_data['activity_heatmap']
+            pivot_data = heat_data.pivot_table(index='hour', columns='day_of_week', values='count', fill_value=0)
+            
+            fig = px.imshow(pivot_data.values,
+                           x=pivot_data.columns,
+                           y=pivot_data.index,
+                           title=f'{title_prefix} - Activity Heatmap',
+                           color_continuous_scale='YlOrRd',
+                           aspect="auto")
+            fig.update_layout(
+                xaxis_title="Day of Week",
+                yaxis_title="Hour of Day",
+                template="plotly_white"
+            )
+            graphs['activity_heatmap.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        # 7. Dashboard (Combined view)
+        if charts_data:
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=('Daily Trend', 'Agent Performance', 'Status Distribution', 'Contact Methods'),
+                specs=[[{"type": "scatter"}, {"type": "bar"}],
+                       [{"type": "pie"}, {"type": "bar"}]]
+            )
+            
+            # Add traces
+            if 'daily_leads' in charts_data and not charts_data['daily_leads'].empty:
+                daily_data = charts_data['daily_leads']
+                fig.add_trace(
+                    go.Scatter(x=daily_data['date'], y=daily_data['count'], mode='lines+markers'),
+                    row=1, col=1
+                )
+            
+            if 'agent_breakdown' in charts_data and not charts_data['agent_breakdown'].empty:
+                agent_data = charts_data['agent_breakdown']
+                fig.add_trace(
+                    go.Bar(x=agent_data['sales_agent'], y=agent_data['count']),
+                    row=1, col=2
+                )
+            
+            if 'status_breakdown' in charts_data and not charts_data['status_breakdown'].empty:
+                status_data = charts_data['status_breakdown']
+                fig.add_trace(
+                    go.Pie(values=status_data['count'], labels=status_data['status']),
+                    row=2, col=1
+                )
+            
+            if 'contact_methods' in charts_data and not charts_data['contact_methods'].empty:
+                contact_data = charts_data['contact_methods']
+                fig.add_trace(
+                    go.Bar(x=contact_data['contact'], y=contact_data['count']),
+                    row=2, col=2
+                )
+            
+            fig.update_layout(height=800, title_text=f"{title_prefix} - Interactive Dashboard")
+            graphs['interactive_dashboard.html'] = fig.to_html(include_plotlyjs='cdn')
+        
+        return graphs
+        
+    except Exception as e:
+        return {}
 
 # Layout by role
 if role == 'salesman':
@@ -1634,6 +2067,15 @@ elif role == 'cto':
                     # Add Excel file to ZIP
                     zip_file.writestr(f'CTO_Analytics_{date_str}.xlsx', excel_buffer.getvalue())
                     
+                    # Generate and add PDF graphs
+                    pdf_graphs = generate_analytics_graphs(df_f, charts_data, date_str, "CTO Analytics")
+                    zip_file.writestr(f'CTO_Graphs_{date_str}.pdf', pdf_graphs)
+                    
+                    # Generate and add interactive HTML graphs
+                    html_graphs = generate_plotly_graphs(df_f, charts_data, date_str, "CTO Analytics")
+                    for filename, html_content in html_graphs.items():
+                        zip_file.writestr(f'graphs/{filename}', html_content)
+                    
                     # Add deals data if available
                     deals_df, _ = read_deals_df(limit=100000)
                     if not deals_df.empty:
@@ -1654,6 +2096,15 @@ Generated for: CTO Dashboard
 
 Contents:
 - CTO_Analytics_{date_str}.xlsx: Complete analytics with all charts data
+- CTO_Graphs_{date_str}.pdf: Static PDF graphs and charts
+- graphs/ folder: Interactive HTML graphs (open in browser)
+  * daily_leads_trend.html: Daily leads trend analysis
+  * agent_performance.html: Agent performance breakdown
+  * status_distribution.html: Lead status distribution
+  * sales_funnel.html: Sales funnel visualization
+  * contact_methods.html: Contact methods analysis
+  * activity_heatmap.html: Activity heatmap
+  * interactive_dashboard.html: Combined interactive dashboard
 - CTO_Deals_Report_{date_str}.xlsx: Deals tracking and performance data
 
 Chart Data Included:
@@ -1665,6 +2116,11 @@ Chart Data Included:
 - Activity heatmaps
 - Rolling averages and trends
 - Filtered data based on current selections
+
+Graphs Available:
+- Static PDF graphs for printing and sharing
+- Interactive HTML graphs for detailed analysis
+- Combined dashboard view for executive overview
 
 CTO Summary:
 - Total Leads: {len(df_all)}
@@ -3087,6 +3543,15 @@ elif role == 'ceo':
                     # Add Excel file to ZIP
                     zip_file.writestr(f'CRM_Analytics_{date_str}.xlsx', excel_buffer.getvalue())
                     
+                    # Generate and add PDF graphs
+                    pdf_graphs = generate_analytics_graphs(df_f, charts_data, date_str, "CEO Analytics")
+                    zip_file.writestr(f'CEO_Graphs_{date_str}.pdf', pdf_graphs)
+                    
+                    # Generate and add interactive HTML graphs
+                    html_graphs = generate_plotly_graphs(df_f, charts_data, date_str, "CEO Analytics")
+                    for filename, html_content in html_graphs.items():
+                        zip_file.writestr(f'graphs/{filename}', html_content)
+                    
                     # Add deals data if available
                     deals_df, _ = read_deals_df(limit=100000)
                     if not deals_df.empty:
@@ -3107,6 +3572,15 @@ Generated for: CEO Dashboard
 
 Contents:
 - CRM_Analytics_{date_str}.xlsx: Complete leads analysis with all charts data
+- CEO_Graphs_{date_str}.pdf: Static PDF graphs and charts
+- graphs/ folder: Interactive HTML graphs (open in browser)
+  * daily_leads_trend.html: Daily leads trend analysis
+  * agent_performance.html: Agent performance breakdown
+  * status_distribution.html: Lead status distribution
+  * sales_funnel.html: Sales funnel visualization
+  * contact_methods.html: Contact methods analysis
+  * activity_heatmap.html: Activity heatmap
+  * interactive_dashboard.html: Combined interactive dashboard
 - Deals_Report_{date_str}.xlsx: Deals tracking and performance data
 
 Chart Data Included:
@@ -3117,6 +3591,11 @@ Chart Data Included:
 - Contact method analysis
 - Activity heatmaps
 - Rolling averages and trends
+
+Graphs Available:
+- Static PDF graphs for printing and sharing
+- Interactive HTML graphs for detailed analysis
+- Combined dashboard view for executive overview
 
 Executive Summary:
 - Total Leads: {total_leads}
