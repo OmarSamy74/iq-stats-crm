@@ -52,7 +52,7 @@ DB_FILE = os.path.join(BASE_DIR, 'crm_full.db')
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 
 # ----------------- DB setup -----------------
-engine = sa.create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, encoding='utf-8')
+engine = sa.create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -153,8 +153,8 @@ def ensure_schema():
     """
     with engine.begin() as conn:
         # Configure SQLite for Unicode support
-        conn.exec_driver_sql("PRAGMA encoding = 'UTF-8'")
-        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+        conn.execute(sa.text("PRAGMA encoding = 'UTF-8'"))
+        conn.execute(sa.text("PRAGMA foreign_keys = ON"))
         
         # Leads table columns
         try:
