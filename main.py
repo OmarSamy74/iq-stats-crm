@@ -362,18 +362,36 @@ def bulk_archive_leads(db, lead_ids, archived_by, reason=None, archive_date=None
 def get_archived_leads_by_date(db, date_filter=None):
     """Get archived leads filtered by date"""
     q = db.query(Lead).filter(Lead.is_archived == 'yes')
+    
     if date_filter:
-        if isinstance(date_filter, str):
-            # Filter by specific date
-            q = q.filter(func.date(Lead.archived_at) == date_filter)
-        elif isinstance(date_filter, (list, tuple)) and len(date_filter) == 2:
-            # Filter by date range
+        if isinstance(date_filter, (list, tuple)) and len(date_filter) == 2:
             start_date, end_date = date_filter
-            q = q.filter(
-                Lead.archived_at >= start_date,
-                Lead.archived_at <= end_date
-            )
+            q = q.filter(Lead.archived_at >= start_date, Lead.archived_at <= end_date)
+        elif isinstance(date_filter, datetime):
+            q = q.filter(Lead.archived_at >= date_filter)
+    
     return q.order_by(Lead.archived_at.desc()).all()
+
+def get_comments_for_leads(db, lead_ids):
+    """Get all comments for a list of lead IDs"""
+    if not lead_ids:
+        return pd.DataFrame()
+    
+    comments = db.query(Comment).filter(Comment.lead_id.in_(lead_ids)).all()
+    
+    if not comments:
+        return pd.DataFrame()
+    
+    comments_data = []
+    for comment in comments:
+        comments_data.append({
+            'lead_id': comment.lead_id,
+            'comment_author': comment.author,
+            'comment_text': comment.text,
+            'comment_created_at': comment.created_at
+        })
+    
+    return pd.DataFrame(comments_data)
 
 def generate_archived_leads_analytics(df):
     """Generate analytics data for archived leads"""
@@ -2153,12 +2171,122 @@ elif role == 'cto':
             st.plotly_chart(fig_ra, use_container_width=True)
 
         st.subheader('Export filtered leads')
-        csv_bytes = df_f.to_csv(index=False).encode('utf-8')
-        st.download_button('Download CSV (filtered)', data=csv_bytes, file_name='leads_filtered.csv', mime='text/csv')
-        xls_buf = io.BytesIO()
-        with pd.ExcelWriter(xls_buf, engine='openpyxl') as writer:
-            df_f.to_excel(writer, index=False, sheet_name='leads_filtered')
-        st.download_button('Download Excel (filtered)', data=xls_buf.getvalue(), file_name='leads_filtered.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        # Basic exports (without comments)
+        col1, col2 = st.columns(2)
+        with col1:
+            csv_bytes = df_f.to_csv(index=False).encode('utf-8')
+            st.download_button('Download CSV (filtered)', data=csv_bytes, file_name='leads_filtered.csv', mime='text/csv')
+        with col2:
+            xls_buf = io.BytesIO()
+            with pd.ExcelWriter(xls_buf, engine='openpyxl') as writer:
+                df_f.to_excel(writer, index=False, sheet_name='leads_filtered')
+            st.download_button('Download Excel (filtered)', data=xls_buf.getvalue(), file_name='leads_filtered.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        # Enhanced export with comments
+        st.markdown('---')
+        st.subheader('📋 Export with Comments & Activities')
+        
+        if st.button('📊 Generate Enhanced Export Package'):
+            try:
+                # Get comments and activities for filtered leads
+                with get_session() as db:
+                    lead_ids = df_f['id'].tolist()
+                    comments_df = get_comments_for_leads(db, lead_ids)
+                    
+                    # Get activities for filtered leads
+                    activities = db.query(Activity).filter(Activity.lead_id.in_(lead_ids)).all()
+                    activities_data = []
+                    for activity in activities:
+                        activities_data.append({
+                            'lead_id': activity.lead_id,
+                            'activity_actor': activity.actor,
+                            'activity_action': activity.action,
+                            'activity_detail': activity.detail,
+                            'activity_timestamp': activity.timestamp
+                        })
+                    activities_df = pd.DataFrame(activities_data)
+                
+                # Create enhanced Excel with multiple sheets
+                enhanced_buffer = io.BytesIO()
+                with pd.ExcelWriter(enhanced_buffer, engine='openpyxl') as writer:
+                    # Main leads data
+                    df_f.to_excel(writer, sheet_name='Filtered_Leads', index=False)
+                    
+                    # Comments data
+                    if not comments_df.empty:
+                        comments_df.to_excel(writer, sheet_name='Lead_Comments', index=False)
+                    
+                    # Activities data
+                    if not activities_df.empty:
+                        activities_df.to_excel(writer, sheet_name='Lead_Activities', index=False)
+                    
+                    # Summary sheet
+                    summary_data = {
+                        'Metric': ['Total Filtered Leads', 'Leads with Comments', 'Leads with Activities', 'Total Comments', 'Total Activities', 'Export Date'],
+                        'Value': [
+                            len(df_f),
+                            len(comments_df['lead_id'].unique()) if not comments_df.empty else 0,
+                            len(activities_df['lead_id'].unique()) if not activities_df.empty else 0,
+                            len(comments_df) if not comments_df.empty else 0,
+                            len(activities_df) if not activities_df.empty else 0,
+                            datetime.now().strftime('%Y-%m-%d %H:%M')
+                        ]
+                    }
+                    pd.DataFrame(summary_data).to_excel(writer, sheet_name='Export_Summary', index=False)
+                
+                # Create ZIP file with enhanced data
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    # Add enhanced Excel file
+                    zip_file.writestr('Enhanced_Leads_Export.xlsx', enhanced_buffer.getvalue())
+                    
+                    # Add individual CSV files
+                    zip_file.writestr('leads_filtered.csv', df_f.to_csv(index=False))
+                    if not comments_df.empty:
+                        zip_file.writestr('lead_comments.csv', comments_df.to_csv(index=False))
+                    if not activities_df.empty:
+                        zip_file.writestr('lead_activities.csv', activities_df.to_csv(index=False))
+                    
+                    # Add README
+                    readme_content = f"""Enhanced Leads Export Package
+Generated on: {datetime.now().strftime('%A, %B %d, %Y at %H:%M')}
+Generated for: CTO Dashboard - Filtered Leads
+
+Contents:
+- Enhanced_Leads_Export.xlsx: Complete data with multiple sheets
+  * Filtered_Leads: Main leads data
+  * Lead_Comments: All comments for filtered leads
+  * Lead_Activities: All activities for filtered leads
+  * Export_Summary: Summary statistics
+
+- Individual CSV files:
+  * leads_filtered.csv: Main leads data
+  * lead_comments.csv: Comments data
+  * lead_activities.csv: Activities data
+
+Export Summary:
+- Total Filtered Leads: {len(df_f)}
+- Leads with Comments: {len(comments_df['lead_id'].unique()) if not comments_df.empty else 0}
+- Leads with Activities: {len(activities_df['lead_id'].unique()) if not activities_df.empty else 0}
+- Total Comments: {len(comments_df) if not comments_df.empty else 0}
+- Total Activities: {len(activities_df) if not activities_df.empty else 0}
+
+This package provides complete visibility into leads, including all associated comments and activity history.
+"""
+                    zip_file.writestr('README.txt', readme_content)
+                
+                # Download button for enhanced package
+                st.download_button(
+                    label='📥 Download Enhanced Export Package (ZIP)',
+                    data=zip_buffer.getvalue(),
+                    file_name=f'Enhanced_Leads_Export_{datetime.now().strftime("%Y%m%d_%H%M")}.zip',
+                    mime='application/zip'
+                )
+                st.success('✅ Enhanced export package ready! Includes comments and activities.')
+                
+            except Exception as e:
+                st.error(f'❌ Error creating enhanced export: {str(e)}')
 
         # CTO Analytics Package Download
         st.markdown('---')
@@ -2184,6 +2312,30 @@ elif role == 'cto':
                     with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                         # Main filtered data
                         df_f.to_excel(writer, sheet_name='Filtered_Leads', index=False)
+                        
+                        # Get comments and activities for filtered leads
+                        with get_session() as db:
+                            lead_ids = df_f['id'].tolist()
+                            comments_df = get_comments_for_leads(db, lead_ids)
+                            
+                            # Get activities for filtered leads
+                            activities = db.query(Activity).filter(Activity.lead_id.in_(lead_ids)).all()
+                            activities_data = []
+                            for activity in activities:
+                                activities_data.append({
+                                    'lead_id': activity.lead_id,
+                                    'activity_actor': activity.actor,
+                                    'activity_action': activity.action,
+                                    'activity_detail': activity.detail,
+                                    'activity_timestamp': activity.timestamp
+                                })
+                            activities_df = pd.DataFrame(activities_data)
+                        
+                        # Comments and Activities data
+                        if not comments_df.empty:
+                            comments_df.to_excel(writer, sheet_name='Lead_Comments', index=False)
+                        if not activities_df.empty:
+                            activities_df.to_excel(writer, sheet_name='Lead_Activities', index=False)
                         
                         # Chart data from all the charts above
                         charts_data = {}
@@ -2223,14 +2375,18 @@ elif role == 'cto':
                             daily_ra.to_excel(writer, sheet_name='Trends_Analysis', index=False)
                             charts_data['trends'] = daily_ra
                         
-                        # CTO Summary statistics
+                        # Enhanced CTO Summary statistics
                         summary_data = {
-                            'Metric': ['Total Leads', 'Filtered Leads', 'Active Agents', 'Date Range', 'Generated By'],
+                            'Metric': ['Total Leads', 'Filtered Leads', 'Active Agents', 'Date Range', 'Leads with Comments', 'Leads with Activities', 'Total Comments', 'Total Activities', 'Generated By'],
                             'Value': [
                                 len(df_all),
                                 len(df_f),
                                 len(agent_counts) if 'agent_breakdown' in charts_data else 0,
                                 f"{date_range[0] if isinstance(date_range, (list, tuple)) else 'All'} to {date_range[1] if isinstance(date_range, (list, tuple)) else 'All'}",
+                                len(comments_df['lead_id'].unique()) if not comments_df.empty else 0,
+                                len(activities_df['lead_id'].unique()) if not activities_df.empty else 0,
+                                len(comments_df) if not comments_df.empty else 0,
+                                len(activities_df) if not activities_df.empty else 0,
                                 'CTO Dashboard'
                             ]
                         }
